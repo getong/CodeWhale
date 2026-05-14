@@ -29,6 +29,12 @@ platform/architecture combinations from v0.8.8 onward:
 ² Provided your toolchain can compile a recent Rust workspace; see
   [Build from source](#7-build-from-source) below.
 
+The Linux release assets are glibc builds, not musl builds. They dynamically
+link normal Linux runtime libraries such as `libdbus-1` and `libc`; SQLite is
+currently bundled into the binary through `rusqlite` so users do not need a
+separate `libsqlite3` runtime package for official release assets. Musl-based
+systems such as Alpine should use [Build from source](#7-build-from-source).
+
 > **Linux ARM64 note (v0.8.7 and earlier).** v0.8.7 and earlier do **not**
 > publish a Linux ARM64 prebuilt; users on HarmonyOS thin-and-light, Asahi
 > Linux, Raspberry Pi, AWS Graviton, etc. saw `Unsupported architecture: arm64`
