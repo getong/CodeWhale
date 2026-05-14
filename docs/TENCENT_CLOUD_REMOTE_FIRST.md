@@ -42,16 +42,16 @@ EdgeOne is optional:
 ## First Lesson: Get a Remote Agent Running
 
 1. Buy or reuse a Tencent Lighthouse instance in Hong Kong.
-2. Clone from CNB when the branch or tag exists there:
+2. Clone from CNB by default when the branch or tag exists there:
 
    ```bash
    export DEEPSEEK_REPO_URL=https://cnb.cool/deepseek-tui.com/DeepSeek-TUI.git
    git ls-remote "$DEEPSEEK_REPO_URL" refs/heads/main
    ```
 
-   For active feature branches that have not been mirrored to CNB yet, use the
-   GitHub URL or manually mirror the branch first. Release tags, `main`, and
-   explicitly mirrored feature branches are the stable CNB path.
+   Tencent setup branches matching `work/v*-feishu-*` or
+   `work/v*-lighthouse*` are mirrored by the GitHub CNB sync workflow. Use
+   the GitHub URL only when the CNB workflow or credentials are unhealthy.
 
 3. Bootstrap `/opt/whalebro` on the server:
 

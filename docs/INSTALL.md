@@ -426,6 +426,28 @@ Set `DEEPSEEK_TUI_RELEASE_BASE_URL` to a mirrored release-asset directory
 (rsproxy, TUNA, Tencent COS, Aliyun OSS), or skip npm entirely and use the
 Cargo mirror setup in [Section 3](#3-install-via-cargo-any-tier-1-rust-target).
 
+### `deepseek update` is blocked by GitHub from mainland China
+
+`deepseek update` normally contacts GitHub Releases for metadata and binary
+assets. On networks where GitHub is blocked or unreliable, use the CNB source
+mirror instead and install both binaries from the release tag:
+
+```bash
+cargo install --git https://cnb.cool/deepseek-tui.com/DeepSeek-TUI --tag vX.Y.Z deepseek-tui-cli --locked --force
+cargo install --git https://cnb.cool/deepseek-tui.com/DeepSeek-TUI --tag vX.Y.Z deepseek-tui     --locked --force
+```
+
+If you operate a binary asset mirror, `deepseek update` can use it directly:
+
+```bash
+DEEPSEEK_TUI_VERSION=X.Y.Z \
+DEEPSEEK_TUI_RELEASE_BASE_URL=https://your-mirror.example.com/DeepSeek-TUI/vX.Y.Z/ \
+deepseek update
+```
+
+The mirror directory must contain `deepseek-artifacts-sha256.txt` and the
+platform binaries from the GitHub release.
+
 ### Debian/Ubuntu: `feature edition2024 is required` from `cargo install`
 
 Some Debian/Ubuntu distro packages ship an older Cargo that cannot parse Rust

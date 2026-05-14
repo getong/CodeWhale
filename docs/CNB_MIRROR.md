@@ -2,22 +2,24 @@
 
 `cnb.cool/deepseek-tui.com/DeepSeek-TUI` is a one-way mirror of this
 GitHub repository for users on networks where GitHub is slow or blocked
-(primarily mainland China). The mirror receives every push to `main` and
-every `v*` release tag.
+(primarily mainland China). The mirror receives every push to `main`, every
+`v*` release tag, and Tencent release-candidate branches used by the
+Lighthouse/Feishu setup.
 
 ## How it works
 
 The mirror is maintained by the [`Sync to CNB`](../.github/workflows/sync-cnb.yml)
 GitHub Actions workflow:
 
-- **Trigger:** `push` to `main`, `push` of any `v*` tag, or
-  `workflow_dispatch` for manual recovery.
+- **Trigger:** `push` to `main`, `push` of any `v*` tag,
+  Tencent setup branches matching `work/v*-feishu-*` or
+  `work/v*-lighthouse*`, or `workflow_dispatch` for manual recovery.
 - **Auth:** HTTPS basic auth as user `cnb` with the `CNB_GIT_TOKEN`
   repository secret as the password.
 - **Scope:** only the ref that triggered the run is pushed. Tag pushes
-  push exactly that tag. Branch pushes push only `main`
-  (`--force-with-lease`). Feature branches and dependabot refs are
-  intentionally *not* mirrored.
+  push exactly that tag. Branch pushes mirror `main` or an explicitly
+  matched Tencent setup branch. Other feature branches and dependabot refs
+  are intentionally *not* mirrored.
 - **Concurrency:** runs are serialized via a `cnb-sync` concurrency
   group so the back-to-back `main` push and tag push from
   `auto-tag.yml` cannot race each other.
@@ -114,11 +116,12 @@ expired:
    ```
 4. Confirm the run succeeds via `gh run list --workflow=sync-cnb.yml`.
 
-## Binary release assets
+## Binary release assets and `deepseek update`
 
 CNB is a code mirror only — it does not host binary release assets.
-Users behind GitHub-blocking networks who need the prebuilt binaries
-have two options:
+Users behind GitHub-blocking networks should not rely on GitHub-only
+`deepseek update` downloads unless they have a release-asset mirror. Use
+one of these paths:
 
 - **`cargo install`** from the CNB mirror:
   ```bash
@@ -129,12 +132,13 @@ have two options:
   separately; see `AGENTS.md` for the two-binary install rationale.)
 
 - **`DEEPSEEK_TUI_RELEASE_BASE_URL`** environment variable, if a
-  third-party CDN mirror of the GitHub Release assets exists. The
-  npm wrapper installer in `npm/deepseek-tui/scripts/install.js`
-  reads this variable to redirect binary downloads. The directory
-  pointed to must contain `deepseek-artifacts-sha256.txt` and the
-  platform binaries; format matches a GitHub Release asset
-  directory.
+  third-party CDN mirror of the GitHub Release assets exists. The npm
+  wrapper installer and `deepseek update` read this variable to redirect
+  binary downloads. For `deepseek update`, also set
+  `DEEPSEEK_TUI_VERSION=X.Y.Z` so the updater can label the mirrored
+  release without contacting GitHub. The directory pointed to must contain
+  `deepseek-artifacts-sha256.txt` and the platform binaries; format matches
+  a GitHub Release asset directory.
 
 A first-party binary CDN mirror for CNB users is on the v0.8.32+
 roadmap; it is not part of v0.8.31.
@@ -148,10 +152,10 @@ automation lane. For a stable install, clone `main` or a release tag from:
 https://cnb.cool/deepseek-tui.com/DeepSeek-TUI.git
 ```
 
-The mirror currently receives `main` and release tags. Feature branches are not
-part of the normal mirror contract, so a Lighthouse bootstrap for an active
-branch should either clone from GitHub, manually mirror that branch to CNB, or
-wait until the branch is merged/tagged.
+The mirror receives `main`, release tags, and the Tencent setup branch patterns
+used by the Lighthouse/Feishu tutorial. Those CNB refs are the default source
+for Tencent-side bootstrap; GitHub is the fallback when the CNB workflow or
+credentials are unhealthy.
 
 CNB deploy-button examples live in `deploy/tencent-lighthouse/cnb/`. They are
 not active until copied into `.cnb.yml` and `.cnb/tag_deploy.yml`, because live

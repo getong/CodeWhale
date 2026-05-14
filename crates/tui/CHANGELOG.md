@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bridge now ships a package lock, installs with `npm ci` on Lighthouse when
   available, and overrides the Lark SDK's transitive `axios` dependency to a
   patched line.
+- **China-friendly update fallback.** `deepseek update` now supports mirrored
+  release assets through `DEEPSEEK_TUI_RELEASE_BASE_URL` plus
+  `DEEPSEEK_TUI_VERSION`, and its network-failure hints point users behind
+  GitHub-blocking networks to the CNB `cargo install --git` path for both
+  shipped binaries.
+- **CNB is the default Tencent release-candidate mirror.** The CNB sync
+  workflow now mirrors Feishu/Lighthouse release branches, so Tencent
+  Lighthouse bootstrap can use CNB before the release branch merges.
 
 ## [0.8.35] - 2026-05-13
 

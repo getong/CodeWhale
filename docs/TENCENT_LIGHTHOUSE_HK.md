@@ -119,13 +119,15 @@ using it:
 
 ```bash
 export DEEPSEEK_REPO_URL=https://cnb.cool/deepseek-tui.com/DeepSeek-TUI.git
-git ls-remote "$DEEPSEEK_REPO_URL" refs/heads/main refs/tags/v0.8.36
+git ls-remote "$DEEPSEEK_REPO_URL" \
+  refs/heads/work/v0.8.36-feishu-lighthouse \
+  refs/tags/v0.8.36
 ```
 
-The current CNB mirror receives `main` and release tags by default. This
-feature branch has been mirrored manually for the v0.8.36 Lighthouse setup.
-Future feature branches may need the same manual mirror step or a GitHub
-fallback until they are merged or tagged.
+The CNB mirror receives `main`, release tags, and Tencent setup branches that
+match `work/v*-feishu-*` or `work/v*-lighthouse*`. CNB is the default source
+for this Lighthouse path; GitHub is the fallback only when the CNB workflow or
+credentials are unhealthy.
 
 If this deployment setup has not been pushed to Git yet, either push the branch
 first or copy this checkout to the VPS before running these commands. A fresh
