@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dependency_mode="independent"`, and RLM now exposes `sub_query_sequence`
   for A-to-B dependent work.
 
+### Added
+
+- **Tencent Lighthouse + Feishu/Lark bridge setup.** Added a `/opt/whalebro`
+  Lighthouse runbook, systemd deploy assets, a long-connection Feishu/Lark
+  bridge, a bridge config validator, and a VPS doctor for runtime, Node,
+  binaries, env, systemd, and localhost health checks.
+
 ## [0.8.35] - 2026-05-13
 
 A post-0.8.34 cleanup release focused on prompt hygiene, context-pressure
