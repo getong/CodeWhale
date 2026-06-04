@@ -2451,6 +2451,11 @@ mod tests {
             primary.exists(),
             "legacy fallback should be copied into primary"
         );
+        let display = loaded.display(crate::localization::Locale::En);
+        assert!(
+            display.contains(&format!("Config file: {}", primary.display())),
+            "settings display should surface the canonical codewhale path:\n{display}"
+        );
     }
 
     #[test]

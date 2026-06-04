@@ -8,11 +8,11 @@ PR is harvested, superseded, deferred, or closed.
 
 ## Live Counts
 
-- Actual open issues: 444
-- Open PRs: 54
-- Repo API open issue count: 498, because GitHub includes PRs in that total
+- Actual open issues: 445
+- Open PRs: 55
+- Repo API open issue count: 500, because GitHub includes PRs in that total
 - Open issues labeled `v0.9.0`: 119
-- Open issues without a milestone: 100
+- Open issues without a milestone: 101
 
 ## Execution Order
 
@@ -42,6 +42,7 @@ harvest/stewardship commits:
 | --- | --- | --- |
 | #2708 Windows sub-agent completion halves TUI render width | Cherry-picked as `e933a11d7`; follow-up fix `72653f8ef` invalidates reused fanout-card rows. | `cargo test -p codewhale-tui --locked subagent`; `cargo test -p codewhale-tui --locked terminal_size`; `cargo clippy -p codewhale-tui --locked -- -D warnings` passed. |
 | #2627 Xiaomi MiMo Token Plan mode | Harvested only the auth-header behavior as `5aa68d986`; did not merge the conflicting mode/env changes. | `cargo test -p codewhale-tui --bin codewhale-tui --locked xiaomi_mimo`; `cargo test -p codewhale-secrets --locked xiaomi_mimo`; `cargo test -p codewhale-config --locked xiaomi_mimo`; `cargo clippy -p codewhale-tui --locked -- -D warnings` passed. |
+| #2730 canonical codewhale settings path | Already harvested as `9e15805f6`; follow-up reviewer assertion added on this branch. | Fixes #2664 by reading legacy DeepSeek settings fallbacks, migrating them into `~/.codewhale/settings.toml`, and ensuring `/config` displays the canonical CodeWhale path. `cargo test -p codewhale-tui --bin codewhale-tui --locked settings_ -- --nocapture` passed. |
 | #2636 project-context mtime cache | Defer direct merge; harvest only after cache key/signature is widened. | Must include constitution changes, auto-generated context deletion, canonical path equivalence, and overwrite detection before landing. |
 | #2634 HarmonyOS port | Locally harvested with additional Nix-chain clearance; keep credited and do not close until the integration branch is public. | User-supplied MatePad Edge demo (`https://bilibili.com/video/av116689597368905`) confirms real-device interest. Added env-driven OpenHarmony SDK setup, OHOS platform guards/fallbacks, self-update disablement, and OHOS target gating for Starlark execpolicy parsing plus PTY support so published OHOS builds do not pull `nix` 0.28 through `rustyline` or `portable-pty`. `cargo check --workspace --all-features --locked`, focused PTY/clipboard tests, and `cargo tree --locked -p codewhale-tui --target aarch64-unknown-linux-ohos -i nix@0.28.0` passed; full OHOS target check is blocked on this host because `OHOS_NATIVE_SDK`/target CC/sysroot are not configured and `ring` cannot find `assert.h`. |
 | #2687 append-only mode/approval prompt | Defer direct merge; draft has compile failures and Plan-mode prompt correctness risks. | Any future harvest must keep stable `message[0]` genuinely mode-agnostic, preserve mode/approval suffixes after capacity replans, and distinguish external overrides from persisted generated prompts. |
@@ -108,7 +109,7 @@ harvest/stewardship commits:
 | #2646 release publish hardening | Mergeable | Already harvested into the 22-commit stack. |
 | #2687 append-only mode/approval prompt | Draft/mergeable | Defer. Review found compile failures and Agent-mode prompt leakage into Plan sessions via hard-coded prompt refresh. |
 | #2708 Windows width fix | Mergeable | Cherry-picked and patched locally. |
-| #2730 canonical codewhale settings path | Mergeable | Already harvested into the 22-commit stack. |
+| #2730 canonical codewhale settings path | Mergeable | Already harvested as `9e15805f6`; follow-up reviewer assertion added locally. Comment/close original after integration branch is public, crediting @xyuai and issue #2664. |
 | #2732 pausable command lifecycle | Draft/mergeable | Defer; review flagged behavior changes. |
 
 ## Issue Reduction Strategy
