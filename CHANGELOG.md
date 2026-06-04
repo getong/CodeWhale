@@ -57,18 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explicit `skills_dir` configuration is now unioned with workspace skill
   discovery instead of being shadowed by workspace-local skills, and configured
   skills take precedence over global defaults when prompt space is constrained.
+- Tool-agent sub-agent routing now inherits the parent session model, or an
+  explicit tool-agent override, instead of hard-coding `deepseek-v4-flash`;
+  the fast lane still disables thinking through provider-aware request shaping.
 
 ### Community
 
-Thanks to **@cyq1017** for the restore-listing implementation (#2513) and
-**@wywsoor** for the broader macOS/iTerm rollback UX report (#2494), and
+Thanks to **@cyq1017** for the restore-listing implementation (#2513),
+**@wywsoor** for the broader macOS/iTerm rollback UX report (#2494),
 **@HUQIANTAO** for the `web_run` lock-splitting work (#2502) and turn-metadata
 prefix-cache stability work (#2517), **@xyuai** for canonical CodeWhale
 settings-path migration work (#2730), **@gaord** for the runtime thread
 workspace update API (#2640), **@shenjackyuanjie** for the
-HarmonyOS/OpenHarmony port and MatePad Edge validation trail (#2634), and
+HarmonyOS/OpenHarmony port and MatePad Edge validation trail (#2634),
 **@idling11** for the PlanArtifact direction in Plan mode (#2733), and
-**@h3c-hexin** for the configured `skills_dir` merge fix (#2737).
+**@h3c-hexin** for the tool-agent model inheritance and configured
+`skills_dir` fixes (#2736, #2737).
 
 ## [0.8.53] - 2026-06-03
 

@@ -2438,6 +2438,29 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_off_is_omitted_for_strict_openai_like_providers() {
+        for provider in [
+            ApiProvider::Openai,
+            ApiProvider::Atlascloud,
+            ApiProvider::WanjieArk,
+            ApiProvider::Arcee,
+            ApiProvider::Huggingface,
+            ApiProvider::Moonshot,
+            ApiProvider::Ollama,
+            ApiProvider::Fireworks,
+        ] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some("off"), provider);
+
+            assert_eq!(
+                body,
+                json!({}),
+                "provider {provider:?} should not receive unsupported reasoning-off fields"
+            );
+        }
+    }
+
+    #[test]
     fn reasoning_effort_uses_nvidia_nim_chat_template_kwargs() {
         let mut body = json!({});
         apply_reasoning_effort(&mut body, Some("max"), ApiProvider::NvidiaNim);

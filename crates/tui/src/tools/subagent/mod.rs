@@ -4697,7 +4697,7 @@ pub(crate) async fn resolve_subagent_assignment_route(
     agent_type: &SubAgentType,
 ) -> SubAgentResolvedRoute {
     if matches!(agent_type, SubAgentType::ToolAgent) {
-        return tool_agent_route();
+        return tool_agent_route(&runtime.model, configured_model);
     }
 
     let explicit_model = configured_model.is_some();
@@ -4720,9 +4720,12 @@ pub(crate) async fn resolve_subagent_assignment_route(
     route
 }
 
-fn tool_agent_route() -> SubAgentResolvedRoute {
+fn tool_agent_route(parent_model: &str, configured_model: Option<String>) -> SubAgentResolvedRoute {
     SubAgentResolvedRoute {
-        model: "deepseek-v4-flash".to_string(),
+        // The tool-agent fast lane is defined by disabling thinking, not by a
+        // DeepSeek-specific model id. Honor explicit role/spawn overrides when
+        // present, otherwise inherit the already provider-resolved parent model.
+        model: configured_model.unwrap_or_else(|| parent_model.to_string()),
         reasoning_effort: Some("off".to_string()),
     }
 }

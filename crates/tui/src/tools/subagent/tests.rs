@@ -845,10 +845,28 @@ fn subagent_auto_route_respects_explicit_or_role_model() {
 }
 
 #[tokio::test]
-async fn tool_agent_route_forces_flash_with_thinking_off() {
-    let runtime = stub_runtime()
+async fn tool_agent_route_inherits_parent_model_with_thinking_off() {
+    let mut runtime = stub_runtime()
         .with_auto_model(false)
         .with_reasoning_effort(Some("max".to_string()), false);
+    runtime.model = "local-provider/tool-fast".to_string();
+
+    let route = resolve_subagent_assignment_route(
+        &runtime,
+        None,
+        "run OCR on this screenshot",
+        &SubAgentType::ToolAgent,
+    )
+    .await;
+
+    assert_eq!(route.model, "local-provider/tool-fast");
+    assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
+}
+
+#[tokio::test]
+async fn tool_agent_route_respects_explicit_model_with_thinking_off() {
+    let mut runtime = stub_runtime().with_auto_model(false);
+    runtime.model = "local-provider/tool-fast".to_string();
 
     let route = resolve_subagent_assignment_route(
         &runtime,
@@ -858,7 +876,7 @@ async fn tool_agent_route_forces_flash_with_thinking_off() {
     )
     .await;
 
-    assert_eq!(route.model, "deepseek-v4-flash");
+    assert_eq!(route.model, "deepseek-v4-pro");
     assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
 }
 
@@ -2210,6 +2228,7 @@ fn stub_runtime() -> SubAgentRuntime {
 /// `Option<...>`. `Config::default()` is enough — `DeepSeekClient::new`
 /// only validates that an API key field exists, not that the key works.
 fn stub_client() -> DeepSeekClient {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let config = crate::config::Config {
         api_key: Some("test-key".to_string()),
         ..crate::config::Config::default()
