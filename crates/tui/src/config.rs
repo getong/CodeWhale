@@ -2518,6 +2518,20 @@ impl Config {
         // 0. DeepSeek compatibility slot. The legacy top-level `api_key`
         // belongs to DeepSeek only; provider-specific keys below must win for
         // NIM/OpenRouter/etc. so a stale DeepSeek key is not sent elsewhere.
+        //
+        // However, when the CLI dispatcher forwards an explicit `--api-key`
+        // through `DEEPSEEK_API_KEY` with the dispatcher source marker, that
+        // intentional override must win over the saved root key. This is
+        // essential for DeepSeek-compatible subscription endpoints where the
+        // user runs something like:
+        //   codewhale --provider deepseek --api-key ark-... --base-url ... --model auto
+        if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
+            && std::env::var("DEEPSEEK_API_KEY_SOURCE").as_deref() == Ok("cli")
+            && let Some(env_key) = codewhale_secrets::env_for("deepseek")
+            && !env_key.trim().is_empty()
+        {
+            return Ok(env_key);
+        }
         if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
             && let Some(configured) = self.api_key.as_ref()
             && !configured.trim().is_empty()
@@ -7002,7 +7016,7 @@ action = "session.compact"
         // Env var path.
         let env_cfg = Config::default();
         unsafe {
-            std::env::set_var("DEEPSEEK_API_KEY", "sk-test-from-env");
+            std::env::set_var("DEEPSEEK_API_KEY", "env-key");
         }
         assert!(
             has_api_key(&env_cfg),
@@ -7010,6 +7024,31 @@ action = "session.compact"
         );
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deepseek_dispatcher_env_key_overrides_config_key() -> Result<()> {
+        let _lock = lock_test_env();
+        let prev_source = std::env::var_os("DEEPSEEK_API_KEY_SOURCE");
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", "ark-dispatcher-key");
+            std::env::set_var("DEEPSEEK_API_KEY_SOURCE", "cli");
+        }
+        let config = Config {
+            api_key: Some("saved-deepseek-key".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(config.deepseek_api_key()?, "ark-dispatcher-key");
+
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            match prev_source {
+                Some(value) => std::env::set_var("DEEPSEEK_API_KEY_SOURCE", value),
+                None => std::env::remove_var("DEEPSEEK_API_KEY_SOURCE"),
+            }
         }
         Ok(())
     }
