@@ -6266,6 +6266,7 @@ async fn apply_command_result(
                         .push(crate::tui::views::status_picker::StatusPickerView::new(
                             &app.status_items,
                             app.api_provider,
+                            app.ui_locale,
                         ));
                 }
             }
