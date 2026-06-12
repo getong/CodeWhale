@@ -2948,6 +2948,17 @@ async fn run_event_loop(
                     }
                 }
 
+                if final_w == 0 || final_h == 0 {
+                    tracing::debug!(
+                        final_w,
+                        final_h,
+                        "zero-size Resize event ignored while terminal is hidden/minimized"
+                    );
+                    force_terminal_repaint = true;
+                    app.needs_redraw = true;
+                    continue;
+                }
+
                 // #582: commit the event-reported size to ratatui's
                 // viewport explicitly before the redraw, instead of
                 // relying on `crossterm::terminal::size()` which gets
@@ -9095,12 +9106,6 @@ fn enable_windows_ime_console_mode() {
 /// across focus events and are only re-established by `resume_terminal`
 /// after a suspension, which always runs a separate path.
 ///
-/// Note: calling this on every FocusGained event pushes one extra Kitty
-/// keyboard mode level onto the terminal's stack without a preceding pop.
-/// After N focus cycles the stack reaches depth N; at shutdown only one
-/// level is popped. On terminals with a finite stack this is benign because
-/// the terminal clears the stack on process exit. A future improvement is
-/// to pop-then-push here so the stack stays at depth ≤1.
 fn recover_terminal_modes<W: Write>(
     writer: &mut W,
     use_mouse_capture: bool,
@@ -9109,6 +9114,7 @@ fn recover_terminal_modes<W: Write>(
     #[cfg(target_os = "windows")]
     enable_windows_ime_console_mode();
 
+    pop_keyboard_enhancement_flags(writer);
     push_keyboard_enhancement_flags(writer);
     if use_mouse_capture && let Err(err) = execute!(writer, EnableMouseCapture) {
         tracing::debug!(?err, "EnableMouseCapture ignored");
