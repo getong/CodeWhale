@@ -1464,6 +1464,7 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
         FleetAlertAdapterConfig, FleetAlertConfig, FleetAlertDispatcher, FleetAlertEvent,
         FleetEnvSecretResolver,
     };
+    use crate::fleet::executor::FleetExecutor;
     use crate::fleet::manager::{FleetManager, FleetStatusSnapshot, FleetWorkerInspection};
     use codewhale_protocol::fleet::{
         FleetAlertEventClass, FleetArtifactKind, FleetRunId, FleetWorkerEventPayload,
@@ -1713,6 +1714,14 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
         }
     }
 
+    fn fleet_codewhale_binary() -> String {
+        std::env::var("CODEWHALE_FLEET_CODEWHALE_BINARY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "codewhale".to_string())
+    }
+
     let exec_config = config
         .fleet
         .as_ref()
@@ -1744,14 +1753,19 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             println!(
                 "manager loop running; use `codewhale fleet status`, `inspect`, `interrupt`, or `stop --all` from another terminal."
             );
-            loop {
-                manager.schedule_run(&report.run_id, max_workers)?;
-                if !manager.run_has_open_work(&report.run_id)? {
-                    print_status(&manager.run_status(&report.run_id)?);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
+            let mut executor = FleetExecutor::new(workspace);
+            let codewhale_binary = fleet_codewhale_binary();
+            let status = manager
+                .run_to_completion(
+                    &report.run_id,
+                    max_workers,
+                    &mut executor,
+                    &codewhale_binary,
+                    None,
+                    Duration::from_secs(2),
+                )
+                .await?;
+            print_status(&status);
             Ok(())
         }
         FleetCommand::Status => {

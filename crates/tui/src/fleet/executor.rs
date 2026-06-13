@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use codewhale_config::FleetExecConfig;
-use codewhale_protocol::fleet::{FleetTaskSpec, FleetWorkerEventPayload};
+use codewhale_protocol::fleet::{FleetHostSpec, FleetTaskSpec, FleetWorkerEventPayload};
 
 use super::host::{FleetHostAdapter, FleetWorkerCommand};
 use super::worker_runtime::fleet_task_prompt;
@@ -154,21 +154,38 @@ pub fn classify_worker_exit(exit_code: Option<i32>, stopped: bool) -> FleetWorke
 /// construction never touches the orchestrator — the parent only ingests a
 /// compact event stream, which is what keeps it light at high fanout.
 pub struct FleetExecutor {
+    workspace: std::path::PathBuf,
     adapter: super::host::LocalProcessFleetHostAdapter,
+    ssh_adapters: std::collections::BTreeMap<String, super::host::SshFleetHostAdapter>,
     streams: std::collections::BTreeMap<String, WorkerStream>,
 }
 
 struct WorkerStream {
     log_path: std::path::PathBuf,
+    host: WorkerStreamHost,
     offset: u64,
     pending: String,
     terminal: bool,
 }
 
+enum WorkerStreamHost {
+    Local,
+    Ssh(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct FleetWorkerTerminalEvent {
+    pub payload: FleetWorkerEventPayload,
+    pub exit_code: Option<i32>,
+}
+
 impl FleetExecutor {
     pub fn new(workspace: impl AsRef<std::path::Path>) -> Self {
+        let workspace = workspace.as_ref().to_path_buf();
         Self {
-            adapter: super::host::LocalProcessFleetHostAdapter::new(workspace),
+            adapter: super::host::LocalProcessFleetHostAdapter::new(&workspace),
+            workspace,
+            ssh_adapters: std::collections::BTreeMap::new(),
             streams: std::collections::BTreeMap::new(),
         }
     }
@@ -179,20 +196,79 @@ impl FleetExecutor {
         worker_id: &str,
         command: FleetWorkerCommand,
         cwd: Option<std::path::PathBuf>,
-    ) -> super::host::FleetHostResult<()> {
+    ) -> super::host::FleetHostResult<super::host::FleetWorkerHandle> {
+        self.start_worker_on_host(worker_id, &FleetHostSpec::Local, command, cwd)
+    }
+
+    /// Start a worker on the requested fleet host.
+    pub fn start_worker_on_host(
+        &mut self,
+        worker_id: &str,
+        host: &FleetHostSpec,
+        command: FleetWorkerCommand,
+        cwd: Option<std::path::PathBuf>,
+    ) -> super::host::FleetHostResult<super::host::FleetWorkerHandle> {
         let mut request = super::host::FleetWorkerStartRequest::new(worker_id, command);
         request.cwd = cwd;
-        let handle = self.adapter.start_worker(request)?;
+        let (handle, host) = match host {
+            FleetHostSpec::Local => {
+                let handle = self.adapter.start_worker(request)?;
+                (handle, WorkerStreamHost::Local)
+            }
+            FleetHostSpec::Ssh { .. } => {
+                let config = super::host::SshFleetHostConfig::from_host_spec(host)?;
+                let key = worker_id.to_string();
+                let adapter = self.ssh_adapters.entry(key.clone()).or_insert(
+                    super::host::SshFleetHostAdapter::new(&self.workspace, config)?,
+                );
+                let handle = adapter.start_worker(request)?;
+                (handle, WorkerStreamHost::Ssh(key))
+            }
+            FleetHostSpec::Docker { image, .. } => {
+                return Err(super::host::FleetHostError {
+                    kind: super::host::FleetHostErrorKind::Configuration,
+                    message: format!("docker fleet workers are not wired yet (image {image})"),
+                });
+            }
+        };
         self.streams.insert(
             worker_id.to_string(),
             WorkerStream {
-                log_path: handle.log_path,
+                log_path: handle.log_path.clone(),
+                host,
                 offset: 0,
                 pending: String::new(),
                 terminal: false,
             },
         );
-        Ok(())
+        Ok(handle)
+    }
+
+    pub fn is_tracking(&self, worker_id: &str) -> bool {
+        self.streams.contains_key(worker_id)
+    }
+
+    pub fn worker_ids(&self) -> Vec<String> {
+        self.streams.keys().cloned().collect()
+    }
+
+    /// Stop tracking a terminal worker so the scheduler can reuse the same
+    /// logical worker id for the next queued task.
+    pub fn forget_worker(&mut self, worker_id: &str) {
+        let Some(stream) = self.streams.remove(worker_id) else {
+            return;
+        };
+        match stream.host {
+            WorkerStreamHost::Local => {
+                let _ = self.adapter.cleanup_worker(worker_id);
+            }
+            WorkerStreamHost::Ssh(key) => {
+                if let Some(adapter) = self.ssh_adapters.get_mut(&key) {
+                    let _ = adapter.cleanup_worker(worker_id);
+                }
+                self.ssh_adapters.remove(&key);
+            }
+        }
     }
 
     /// Read any newly-written stream-json lines for a worker and map them to
@@ -228,10 +304,26 @@ impl FleetExecutor {
     /// once. Returns `None` while the worker is still running or already
     /// finalized.
     pub fn poll_terminal(&mut self, worker_id: &str) -> Option<FleetWorkerEventPayload> {
+        self.poll_terminal_with_status(worker_id)
+            .map(|event| event.payload)
+    }
+
+    /// Poll the worker process and include the raw exit code for receipt
+    /// verification.
+    pub fn poll_terminal_with_status(
+        &mut self,
+        worker_id: &str,
+    ) -> Option<FleetWorkerTerminalEvent> {
         if self.streams.get(worker_id).is_none_or(|s| s.terminal) {
             return None;
         }
-        let status = self.adapter.read_status(worker_id).ok()?;
+        let status = match self.streams.get(worker_id).map(|s| &s.host)? {
+            WorkerStreamHost::Local => self.adapter.read_status(worker_id).ok()?,
+            WorkerStreamHost::Ssh(key) => self
+                .ssh_adapters
+                .get_mut(key)
+                .and_then(|adapter| adapter.read_status(worker_id).ok())?,
+        };
         let terminal = match status.state {
             super::host::FleetHostWorkerState::Running
             | super::host::FleetHostWorkerState::Unknown => return None,
@@ -246,7 +338,10 @@ impl FleetExecutor {
         if let Some(stream) = self.streams.get_mut(worker_id) {
             stream.terminal = true;
         }
-        Some(terminal)
+        Some(FleetWorkerTerminalEvent {
+            payload: terminal,
+            exit_code: status.exit_code,
+        })
     }
 
     /// True once every started worker has reached a terminal state.
