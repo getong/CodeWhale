@@ -2161,6 +2161,24 @@ fn context_budget_uses_provider_effective_window_for_openai_codex() {
 }
 
 #[test]
+fn route_context_budget_uses_shared_budget_service() {
+    let _lock = lock_test_env();
+    let budget = route_context_budget_for_provider(ApiProvider::OpenaiCodex, "gpt-5.5", 380_000)
+        .expect("OpenAI Codex should produce a route budget");
+
+    assert_eq!(budget.window_tokens, 400_000);
+    assert_eq!(
+        budget.output_cap_tokens,
+        u64::from(effective_max_output_tokens("gpt-5.5"))
+    );
+    assert_eq!(
+        budget.pressure,
+        crate::context_budget::PressureLevel::Critical
+    );
+    assert!(!budget.fits_additional(1));
+}
+
+#[test]
 fn effective_max_output_tokens_caps_api_request_for_large_window_models() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // v4_cap and flash_cap below see the same env state.

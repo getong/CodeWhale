@@ -6,6 +6,7 @@
 
 use crate::compaction::estimate_tokens;
 use crate::config::{ApiProvider, provider_capability};
+use crate::context_budget::ContextBudget;
 use crate::error_taxonomy::ErrorCategory;
 use crate::models::{Message, SystemPrompt, context_window_for_model};
 use crate::tools::spec::ToolResult;
@@ -60,8 +61,6 @@ pub(super) fn effective_max_output_tokens(model: &str) -> u32 {
 pub(super) const MIN_RECENT_MESSAGES_TO_KEEP: usize = 4;
 /// Allow a few emergency recovery attempts before failing the turn.
 pub(super) const MAX_CONTEXT_RECOVERY_ATTEMPTS: u8 = 2;
-/// Reserve additional headroom to avoid hitting provider hard limits.
-const CONTEXT_HEADROOM_TOKENS: usize = 1024;
 /// Hard cap for any tool output inserted into model context.
 const TOOL_RESULT_CONTEXT_HARD_LIMIT_CHARS: usize = 12_000;
 /// Soft cap for known noisy tools inserted into model context.
@@ -583,21 +582,32 @@ pub(super) fn context_input_budget_for_provider(
     provider: ApiProvider,
     model: &str,
 ) -> Option<usize> {
-    let capability = provider_capability(provider, model);
-    context_input_budget_for_window(model, capability.context_window)
+    route_context_budget_for_provider(provider, model, 0)
+        .and_then(|budget| usize::try_from(budget.available_input_tokens).ok())
 }
 
-fn context_input_budget_for_window(model: &str, window_tokens: u32) -> Option<usize> {
-    let window = usize::try_from(window_tokens).ok()?;
-    let reserved_output = if window_tokens >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
+pub(super) fn route_context_budget_for_provider(
+    provider: ApiProvider,
+    model: &str,
+    input_tokens: usize,
+) -> Option<ContextBudget> {
+    let capability = provider_capability(provider, model);
+    Some(ContextBudget::new(
+        u64::from(capability.context_window),
+        u64::try_from(input_tokens).ok()?,
+        u64::from(route_output_reservation_for_window(
+            model,
+            capability.context_window,
+        )),
+    ))
+}
+
+fn route_output_reservation_for_window(model: &str, window_tokens: u32) -> u32 {
+    if window_tokens >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
         TURN_MAX_OUTPUT_TOKENS
     } else {
         effective_max_output_tokens(model)
-    };
-    let output = usize::try_from(reserved_output).ok()?;
-    window
-        .checked_sub(output)
-        .and_then(|v| v.checked_sub(CONTEXT_HEADROOM_TOKENS))
+    }
 }
 
 pub(super) fn is_context_length_error_message(message: &str) -> bool {

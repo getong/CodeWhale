@@ -2925,6 +2925,8 @@ mod capacity_flow;
 mod context;
 mod handle;
 pub(crate) use context::compact_tool_result_for_context;
+#[cfg(test)]
+use context::route_context_budget_for_provider;
 use context::{
     COMPACTION_SUMMARY_MARKER, MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
     context_input_budget_for_provider, effective_max_output_tokens,
