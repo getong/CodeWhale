@@ -2112,6 +2112,35 @@ fn state_resolvers_reject_path_traversal_subdirs() {
 }
 
 #[test]
+fn project_state_resolvers_reject_path_traversal_subdirs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+
+    for bad in ["..", "../secret", "/etc", "a/../../b"] {
+        let err = resolve_project_state_dir(&workspace, bad)
+            .err()
+            .unwrap_or_else(|| panic!("expected {bad:?} to be rejected"));
+        assert!(
+            format!("{err:#}").contains("state subdir"),
+            "expected rejection of {bad:?}, got {err:#}"
+        );
+        assert!(
+            ensure_project_state_dir(&workspace, bad).is_err(),
+            "write resolver must also reject {bad:?}"
+        );
+    }
+
+    let safe = resolve_project_state_dir(&workspace, "notes.md")
+        .expect("safe project state subdir should resolve")
+        .1;
+    assert_eq!(safe, workspace.join(LEGACY_APP_DIR).join("notes.md"));
+    let created =
+        ensure_project_state_dir(&workspace, "a/b").expect("safe nested project state dir");
+    assert_eq!(created, workspace.join(CODEWHALE_APP_DIR).join("a/b"));
+}
+
+#[test]
 fn normalize_config_file_path_rejects_traversal() {
     let err = normalize_config_file_path(PathBuf::from("../config.toml"))
         .expect_err("traversal path should fail");

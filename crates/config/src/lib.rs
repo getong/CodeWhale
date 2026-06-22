@@ -3415,18 +3415,20 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// Returns `(true, path)` when the primary `.codewhale/` path is used,
 /// `(false, path)` for the legacy fallback. The boolean helps callers
 /// emit a deprecation notice on legacy paths.
-pub fn resolve_project_state_dir(workspace: &Path, subdir: &str) -> (bool, PathBuf) {
+pub fn resolve_project_state_dir(workspace: &Path, subdir: &str) -> Result<(bool, PathBuf)> {
+    ensure_safe_state_subdir(subdir)?;
     let primary = workspace.join(CODEWHALE_APP_DIR).join(subdir);
     if primary.exists() {
-        return (true, primary);
+        return Ok((true, primary));
     }
     let legacy = workspace.join(LEGACY_APP_DIR).join(subdir);
-    (false, legacy)
+    Ok((false, legacy))
 }
 
 /// Ensure a project-local state subdirectory exists under `.codewhale/`,
 /// creating it if necessary. Returns the directory path.
 pub fn ensure_project_state_dir(workspace: &Path, subdir: &str) -> Result<PathBuf> {
+    ensure_safe_state_subdir(subdir)?;
     let dir = workspace.join(CODEWHALE_APP_DIR).join(subdir);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create {}/", dir.display()))?;
