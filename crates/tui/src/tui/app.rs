@@ -15,7 +15,8 @@ use crate::artifacts::ArtifactRecord;
 use crate::client::{CacheWarmupKey, PromptInspection};
 use crate::compaction::CompactionConfig;
 use crate::config::{
-    ApiProvider, Config, DEFAULT_TEXT_MODEL, SavedCredential, has_api_key, save_api_key,
+    ApiProvider, Config, DEFAULT_TEXT_MODEL, SavedCredential, has_api_key, has_api_key_for,
+    save_api_key,
 };
 use crate::config_ui::ConfigUiMode;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
@@ -1069,17 +1070,76 @@ pub enum InitialInput {
     Submit(String),
 }
 
+/// Durable Agent-era permission baseline that Plan/YOLO restore to (#3386).
+///
+/// Mode cycling used to be tangled with permission policy: each mode mutated
+/// `allow_shell`/`trust_mode`/`approval_mode` directly and ad-hoc
+/// `YoloRestoreState`/`PlanRestoreState` snapshots tried to put things back on
+/// exit. That made it easy to leak YOLO's elevated authority into Agent.
+///
+/// Instead we keep one canonical baseline here — the permission surface the
+/// user has chosen for Agent mode — and derive every mode's effective policy
+/// from it via [`base_policy_for_mode`]. `set_mode` refreshes this from the
+/// live fields whenever the user leaves Agent, so toggling shell/trust/approval
+/// in Agent (wherever that happens in the UI) is captured before any transient
+/// Plan/YOLO policy overwrites the live mirrors.
 #[derive(Debug, Clone, Copy)]
-struct YoloRestoreState {
+struct ModeSessionPrefs {
+    agent_allow_shell: bool,
+    agent_trust_mode: bool,
+    agent_approval_mode: ApprovalMode,
+}
+
+/// The permission policy a given [`AppMode`] resolves to (#3386).
+///
+/// This is a pure projection of `(mode, prefs)` — see [`base_policy_for_mode`].
+/// The App keeps `allow_shell`/`trust_mode`/`approval_mode`/`yolo` as derived
+/// mirrors of these values so the rest of the crate can keep reading the plain
+/// booleans without a type migration.
+#[derive(Debug, Clone, Copy)]
+struct EffectiveModePolicy {
+    #[allow(dead_code)]
+    mode: AppMode,
     allow_shell: bool,
     trust_mode: bool,
     approval_mode: ApprovalMode,
+    /// Whether tool calls auto-approve (YOLO authority). Mirrors `self.yolo`.
+    auto_approve: bool,
 }
 
-/// Saved approval mode to restore when leaving Plan mode (#3279).
-#[derive(Debug, Clone, Copy)]
-struct PlanRestoreState {
-    approval_mode: ApprovalMode,
+/// Resolve a mode's effective permission policy from the durable Agent baseline.
+///
+/// This is the single source of truth for the mode/permission table (#3386):
+/// - `Plan`   → read-only: no shell, no trust, `Suggest` approvals.
+/// - `Agent`  → the user's durable baseline (`prefs`).
+/// - `Yolo`   → full authority: shell + trust + `Auto` approvals.
+///
+/// Pure and side-effect free so it can be unit-tested directly and reused by
+/// any policy consumer.
+fn base_policy_for_mode(mode: AppMode, prefs: &ModeSessionPrefs) -> EffectiveModePolicy {
+    match mode {
+        AppMode::Plan => EffectiveModePolicy {
+            mode,
+            allow_shell: false,
+            trust_mode: false,
+            approval_mode: ApprovalMode::Suggest,
+            auto_approve: false,
+        },
+        AppMode::Agent => EffectiveModePolicy {
+            mode,
+            allow_shell: prefs.agent_allow_shell,
+            trust_mode: prefs.agent_trust_mode,
+            approval_mode: prefs.agent_approval_mode,
+            auto_approve: false,
+        },
+        AppMode::Yolo => EffectiveModePolicy {
+            mode,
+            allow_shell: true,
+            trust_mode: true,
+            approval_mode: ApprovalMode::Auto,
+            auto_approve: true,
+        },
+    }
 }
 
 // === Sub-state structs for App field organization (#377) ===
@@ -1531,6 +1591,15 @@ pub struct App {
     pub api_provider: ApiProvider,
     /// Primary provider plus configured fallback providers for this session.
     pub provider_chain: Option<ProviderChain>,
+    /// Per-provider auth/local readiness snapshot for the fallback chain (#2574).
+    ///
+    /// Captured at startup alongside `provider_chain` (where the live `Config` is
+    /// in scope). `advance_fallback` consults it to skip chain entries that
+    /// cannot serve a turn — hosted providers missing a key — while local
+    /// providers (Ollama/vLLM/SGLang) are always ready. Stored as `(provider,
+    /// ready)` pairs; lookups fall back to "ready" for providers not present so
+    /// an unknown entry is tried rather than silently skipped.
+    provider_readiness: Vec<(ApiProvider, bool)>,
     /// Human-readable description of the last provider fallback event.
     pub last_fallback_reason: Option<String>,
     /// True when the active provider/base URL accepts arbitrary model IDs
@@ -1732,8 +1801,10 @@ pub struct App {
     pub hooks: HookExecutor,
     #[allow(dead_code)]
     pub yolo: bool,
-    yolo_restore: Option<YoloRestoreState>,
-    plan_restore: Option<PlanRestoreState>,
+    /// Durable Agent-era permission baseline that Plan/YOLO derive from and
+    /// restore to (#3386). Refreshed from the live fields whenever the user
+    /// leaves Agent mode; see [`base_policy_for_mode`] and `set_mode`.
+    mode_prefs: ModeSessionPrefs,
     // Clipboard handler
     pub clipboard: ClipboardHandler,
     // Tool approval session allowlist
@@ -2227,6 +2298,24 @@ impl App {
             .map(|kind| ProviderChain::new(kind, &config.fallback_providers))
             .filter(|chain| chain.providers().len() > 1);
 
+        // Snapshot per-provider readiness for the fallback chain (#2574). Uses
+        // the same `has_api_key_for` helper the provider picker uses, so hosted
+        // providers require a key and self-hosted ones (Ollama/vLLM/SGLang) are
+        // reported ready without one. Empty when there is no fallback chain.
+        let provider_readiness = provider_chain
+            .as_ref()
+            .map(|chain| {
+                chain
+                    .providers()
+                    .iter()
+                    .map(|kind| {
+                        let provider = ApiProvider::from_kind(*kind);
+                        (provider, has_api_key_for(config, provider))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Check if the effective provider has an API key. This must happen
         // after settings.default_provider is applied; otherwise a saved
         // third-party provider can be pushed back into DeepSeek onboarding.
@@ -2338,18 +2427,27 @@ impl App {
             needs_workspace_trust,
         );
 
-        let yolo_restore = if initial_mode == AppMode::Yolo {
-            Some(YoloRestoreState {
-                allow_shell: config.allow_shell(),
-                trust_mode: false,
-                approval_mode: config
-                    .approval_policy
-                    .as_deref()
-                    .and_then(ApprovalMode::from_config_value)
-                    .unwrap_or_default(),
-            })
-        } else {
-            None
+        // Durable Agent-era permission baseline (#3386). Plan/YOLO derive from
+        // and restore to this. When the user starts in YOLO the live shell flag
+        // is force-enabled below, so the baseline shell value is taken from
+        // config (the pre-YOLO surface) rather than the live mirror; otherwise
+        // it mirrors the resolved `allow_shell` option. Trust is never part of
+        // the Agent baseline (it is YOLO-only authority). Approval mirrors the
+        // configured policy. This preserves the exact values the previous
+        // `YoloRestoreState`/`PlanRestoreState` snapshots restored.
+        let configured_approval_mode = config
+            .approval_policy
+            .as_deref()
+            .and_then(ApprovalMode::from_config_value)
+            .unwrap_or_default();
+        let mode_prefs = ModeSessionPrefs {
+            agent_allow_shell: if initial_mode == AppMode::Yolo {
+                config.allow_shell()
+            } else {
+                allow_shell
+            },
+            agent_trust_mode: false,
+            agent_approval_mode: configured_approval_mode,
         };
         let allow_shell = allow_shell || initial_mode == AppMode::Yolo;
         let shell_manager = new_shared_shell_manager(workspace.clone());
@@ -2446,6 +2544,7 @@ impl App {
             last_effective_model: None,
             api_provider: provider,
             provider_chain,
+            provider_readiness,
             last_fallback_reason: None,
             model_ids_passthrough,
             active_route_limits: None,
@@ -2533,8 +2632,7 @@ impl App {
             api_key_cursor: 0,
             hooks,
             yolo: initial_mode == AppMode::Yolo,
-            yolo_restore,
-            plan_restore: None,
+            mode_prefs,
             clipboard: ClipboardHandler::new(),
             approval_session_approved: HashSet::new(),
             approval_session_denied: HashSet::new(),
@@ -2740,51 +2838,36 @@ impl App {
             return false;
         }
 
-        let entering_yolo = mode == AppMode::Yolo && previous_mode != AppMode::Yolo;
-        let leaving_yolo = previous_mode == AppMode::Yolo && mode != AppMode::Yolo;
-        let entering_plan = mode == AppMode::Plan && previous_mode != AppMode::Plan;
-        let leaving_plan = previous_mode == AppMode::Plan && mode != AppMode::Plan;
         self.mode = mode;
         self.status_message = Some(format!("Switched to {} mode", mode.label()));
 
-        // Restore outgoing mode state before capturing incoming mode state. This
-        // keeps cross-mode hops such as Plan -> YOLO and YOLO -> Plan from
-        // saving transient policy values as the next mode's baseline.
-        if leaving_yolo && let Some(restore) = self.yolo_restore.take() {
-            self.allow_shell = restore.allow_shell;
-            self.trust_mode = restore.trust_mode;
-            self.approval_mode = restore.approval_mode;
+        // Mode cycling is untangled from permission policy (#3386). The user
+        // only edits the durable permission surface while in Agent mode, so
+        // refresh the baseline from the live mirrors whenever we leave Agent —
+        // before any transient Plan/YOLO policy overwrites them. This subsumes
+        // the old per-mode `YoloRestoreState`/`PlanRestoreState` snapshots:
+        // cross-mode hops (Plan -> YOLO, YOLO -> Plan) do not touch the baseline,
+        // so YOLO's elevated authority never bleeds into the restored Agent
+        // surface (#3279).
+        if previous_mode == AppMode::Agent {
+            self.mode_prefs = ModeSessionPrefs {
+                agent_allow_shell: self.allow_shell,
+                agent_trust_mode: self.trust_mode,
+                agent_approval_mode: self.approval_mode,
+            };
         }
 
-        // Plan save/restore (#3279): Plan mode derives its write-blocking from
-        // the mode itself (turn_loop), but the TUI approval surface reads
-        // `app.approval_mode` without consulting `app.mode`.  Save the Agent-era
-        // approval mode when entering Plan so it is restored when the user
-        // switches back to Agent.
-        if leaving_plan && let Some(restore) = self.plan_restore.take() {
-            self.approval_mode = restore.approval_mode;
-        }
+        // Derive the effective permission policy for the incoming mode from the
+        // single source of truth and apply it to the live mirrors in one block.
+        // Plan's write-blocking still comes from `self.mode` in turn_loop; this
+        // also keeps the TUI approval surface (which reads `self.approval_mode`
+        // without consulting `self.mode`) consistent with the active mode.
+        let policy = base_policy_for_mode(mode, &self.mode_prefs);
+        self.allow_shell = policy.allow_shell;
+        self.trust_mode = policy.trust_mode;
+        self.approval_mode = policy.approval_mode;
+        self.yolo = policy.auto_approve;
 
-        if entering_plan {
-            self.plan_restore = Some(PlanRestoreState {
-                approval_mode: self.approval_mode,
-            });
-        }
-
-        // YOLO save/restore: captures the full pre-YOLO permission surface so
-        // exiting YOLO puts the user back exactly where they were.
-        if entering_yolo {
-            self.yolo_restore = Some(YoloRestoreState {
-                allow_shell: self.allow_shell,
-                trust_mode: self.trust_mode,
-                approval_mode: self.approval_mode,
-            });
-            self.allow_shell = true;
-            self.trust_mode = true;
-            self.approval_mode = ApprovalMode::Auto;
-        }
-
-        self.yolo = mode == AppMode::Yolo;
         if mode != AppMode::Plan {
             self.plan_prompt_pending = false;
             self.plan_tool_used_in_turn = false;
@@ -5560,20 +5643,71 @@ impl App {
             .map_or(0, |chain| chain.providers().len())
     }
 
+    /// Whether a fallback chain entry can serve a turn right now (#2574).
+    ///
+    /// Mirrors the provider picker's eligibility: hosted providers need a key
+    /// (`has_api_key_for`, captured into `provider_readiness` at startup) while
+    /// self-hosted providers (Ollama/vLLM/SGLang) are always ready. Providers
+    /// absent from the snapshot default to ready so an unknown entry is tried
+    /// rather than silently skipped.
+    fn fallback_provider_is_ready(&self, provider: ApiProvider) -> bool {
+        self.provider_readiness
+            .iter()
+            .find_map(|(candidate, ready)| (*candidate == provider).then_some(*ready))
+            .unwrap_or(true)
+    }
+
+    /// Advance to the next *eligible* provider in the fallback chain (#2574).
+    ///
+    /// Walks the chain from the current position, skipping entries that are not
+    /// ready (hosted providers missing auth) and recording a clear note for each
+    /// skip. Local providers are always eligible. Returns the first ready
+    /// provider, or `None` (with an exhaustion reason) when every remaining entry
+    /// is unready or the end of the chain is reached. `ProviderChain::advance`
+    /// stays pure — the readiness filtering lives here at the App level.
+    ///
+    /// Note: auth-rejection (401) failures never reach this path; the caller
+    /// excludes them from fallback so a bad key does not silently rotate
+    /// providers (see `apply_engine_error_to_app`).
     pub fn advance_fallback(&mut self, reason: impl Into<String>) -> Option<ApiProvider> {
         let reason = reason.into();
-        let chain = self.provider_chain.as_mut()?;
-        let Some(next_kind) = chain.advance() else {
+        self.provider_chain.as_ref()?;
+
+        let mut skip_notes: Vec<String> = Vec::new();
+        let mut chosen: Option<ApiProvider> = None;
+        while let Some(next_kind) = self
+            .provider_chain
+            .as_mut()
+            .and_then(ProviderChain::advance)
+        {
+            let candidate = ApiProvider::from_kind(next_kind);
+            if self.fallback_provider_is_ready(candidate) {
+                chosen = Some(candidate);
+                break;
+            }
+            skip_notes.push(format!("skipped {}: needs auth", candidate.as_str()));
+        }
+
+        let skipped = if skip_notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", skip_notes.join("; "))
+        };
+
+        let Some(next_provider) = chosen else {
+            let total = self
+                .provider_chain
+                .as_ref()
+                .map_or(0, |chain| chain.providers().len());
             self.last_fallback_reason = Some(format!(
-                "Fallback chain exhausted after {} provider(s): {reason}",
-                chain.providers().len()
+                "Fallback chain exhausted after {total} provider(s): {reason}{skipped}"
             ));
             return None;
         };
-        let next_provider = ApiProvider::from_kind(next_kind);
+
         self.api_provider = next_provider;
         self.last_fallback_reason = Some(format!(
-            "Fell back to {} after recoverable provider error: {reason}",
+            "Fell back to {} after recoverable provider error: {reason}{skipped}",
             next_provider.as_str()
         ));
         Some(next_provider)

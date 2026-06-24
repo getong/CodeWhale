@@ -89,7 +89,10 @@ const PROVIDER_LABEL_MAP = {
   Minimax: { id: "minimax", label: "MiniMax", env: "MINIMAX_API_KEY" },
 };
 
-const EXCLUDED_PROVIDERS = new Set(["DeepseekCN"]);
+// DeepseekCN: not wired through shared ProviderKind (#1104).
+// Custom: the dynamic OpenAI-compatible meta-provider (#1519) — a runtime
+// catch-all for user-defined endpoints, not a website-listable provider.
+const EXCLUDED_PROVIDERS = new Set(["DeepseekCN", "Custom"]);
 
 export function deriveProviders() {
   const cfg = read("crates/tui/src/config.rs");
@@ -112,9 +115,15 @@ export function deriveProviders() {
 }
 
 export function deriveDefaultModel() {
-  const cfg = read("crates/tui/src/config.rs");
-  if (!cfg) return null;
-  const m = cfg.match(/DEFAULT_TEXT_MODEL[^"]*"([^"]+)"/);
+  // DEFAULT_TEXT_MODEL's definition moved to config/models.rs in the #3311 split;
+  // read both and match the const *definition* specifically (`= "..."`) so we
+  // don't mis-bind to a later string at a mere use site.
+  const cfg =
+    (read("crates/tui/src/config/models.rs") ?? "") +
+    "\n" +
+    (read("crates/tui/src/config.rs") ?? "");
+  if (!cfg.trim()) return null;
+  const m = cfg.match(/DEFAULT_TEXT_MODEL\s*(?::\s*&str\s*)?=\s*"([^"]+)"/);
   return m ? m[1] : null;
 }
 

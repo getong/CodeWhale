@@ -105,9 +105,10 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
     Minimax: { id: "minimax", label: "MiniMax", env: "MINIMAX_API_KEY" },
   };
   // Log loudly on unmapped variants so a new provider can never be silently
-  // dropped from the drift-derived facts again. DeepseekCN is the one
-  // deliberate exclusion (see comment above / issue #1104).
-  const EXCLUDED = new Set(["DeepseekCN"]);
+  // dropped from the drift-derived facts again. DeepseekCN (#1104) and the
+  // dynamic Custom meta-provider (#1519, user-defined endpoints) are the
+  // deliberate exclusions.
+  const EXCLUDED = new Set(["DeepseekCN", "Custom"]);
   const unmapped = variants.filter((v) => !EXCLUDED.has(v) && !labelMap[v]);
   if (unmapped.length > 0) {
     console.warn(
@@ -119,7 +120,9 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
 }
 
 function deriveDefaultModel(cfg: string): string | null {
-  const m = cfg.match(/DEFAULT_TEXT_MODEL[^"]*"([^"]+)"/);
+  // Match the const *definition* (`= "..."`); the definition moved to
+  // config/models.rs in the #3311 split, so callers pass config.rs + models.rs.
+  const m = cfg.match(/DEFAULT_TEXT_MODEL\s*(?::\s*&str\s*)?=\s*"([^"]+)"/);
   return m ? m[1] : null;
 }
 
@@ -161,9 +164,10 @@ function deriveLicense(licText: string): string | null {
 }
 
 export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts | null> {
-  const [cargo, configRs, sandboxFiles, npmPkg, licText, toolFiles, latestRelease] = await Promise.all([
+  const [cargo, configRs, configModels, sandboxFiles, npmPkg, licText, toolFiles, latestRelease] = await Promise.all([
     fetchText("Cargo.toml", ghToken),
     fetchText("crates/tui/src/config.rs", ghToken),
+    fetchText("crates/tui/src/config/models.rs", ghToken),
     fetchListing("crates/tui/src/sandbox", ghToken),
     fetchText("npm/codewhale/package.json", ghToken),
     fetchText("LICENSE", ghToken),
@@ -180,7 +184,7 @@ export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts
     crates: deriveCrates(cargo),
     sandboxBackends: sandboxFiles ? deriveSandboxBackends(sandboxFiles) : BUILD_FACTS.sandboxBackends,
     providers: deriveProvidersFromConfig(configRs),
-    defaultModel: deriveDefaultModel(configRs),
+    defaultModel: deriveDefaultModel(`${configRs}\n${configModels ?? ""}`),
     nodeEngines: (() => {
       try { return npmPkg ? JSON.parse(npmPkg).engines?.node ?? null : null; } catch { return null; }
     })(),

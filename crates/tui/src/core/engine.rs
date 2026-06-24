@@ -763,7 +763,7 @@ impl Engine {
                 )
             })?;
         let route_config = route.config;
-        match DeepSeekClient::new(&route_config) {
+        match DeepSeekClient::from_candidate(&route_config, &route.candidate) {
             Ok(client) => {
                 self.api_provider = provider;
                 self.api_config = route_config;
@@ -3407,6 +3407,10 @@ pub(super) fn auto_review_run_origin_for_plan(
     }
 }
 
+// The parameter list intentionally mirrors `AutoReviewContext::from_tool_call`,
+// which this thin wrapper builds; the 8 call sites (1 prod + tests) read clearer
+// passing the fields than constructing a context first.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn auto_review_plan_decision(
     policy: &crate::tui::auto_review::AutoReviewPolicy,
     tool_name: &str,

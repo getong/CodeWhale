@@ -519,3 +519,82 @@ fn snapshot_feeds_route_resolver_offerings() {
             .any(|o| o.wire_model_id.as_str() == "glm-voice")
     );
 }
+
+// ---------------------------------------------------------------------------
+// #3385: the committed bundled Models.dev asset.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bundled_asset_parses() {
+    // The committed asset must `include_str!`-load and deserialize into the
+    // parser's `ModelsDevCatalog` shape. This is the build-time guard that keeps
+    // `bundled_models_dev_catalog()` panic-free in shipped builds.
+    let catalog = ModelsDevCatalog::parse_json(BUNDLED_MODELS_DEV_JSON)
+        .expect("committed bundled asset must be valid Models.dev JSON");
+    assert!(
+        !catalog.providers.is_empty(),
+        "bundled asset must carry provider rows"
+    );
+    // The helper returns the same parsed catalog.
+    assert_eq!(bundled_models_dev_catalog(), catalog);
+}
+
+#[test]
+fn bundled_asset_yields_real_chat_offerings_for_key_models() {
+    let rows = bundled_catalog_offerings();
+    assert!(
+        rows.len() >= 20,
+        "expected dozens of bundled chat offerings, got {}",
+        rows.len()
+    );
+
+    // A GLM and a Kimi row carry their real (non-default) context windows,
+    // proving real facts flow rather than `RouteLimits::default()` (unknown).
+    let glm = find(&rows, "zai", "GLM-5.2");
+    assert_eq!(glm.limit.as_ref().and_then(|l| l.context), Some(1_000_000));
+    assert!(glm.default_for_provider);
+
+    let kimi = find(&rows, "moonshot", "kimi-k2.7-code");
+    assert_eq!(kimi.limit.as_ref().and_then(|l| l.context), Some(262_144));
+
+    // Audio/TTS rows are absent (the asset only ships chat models, but assert
+    // the filter contract anyway).
+    assert!(
+        rows.iter().all(|r| !r.wire_model_id.contains("tts")),
+        "no TTS rows should reach the offering layer"
+    );
+}
+
+#[test]
+fn bundled_asset_pricing_is_honest() {
+    let rows = bundled_catalog_offerings();
+
+    // DeepSeek-native rows are intentionally unpriced here (priced via the
+    // time-aware DeepSeek table elsewhere); pricing them would also break the
+    // route layer's `unpriced_offering_stays_unknown` invariant.
+    let deepseek = find(&rows, "deepseek", "deepseek-v4-pro");
+    assert!(
+        deepseek.cost.is_none(),
+        "DeepSeek-native rows must stay unpriced in the bundled asset"
+    );
+
+    // Any row that *does* carry a cost must expose a usable input/output rate
+    // (the honesty rule: no cache-only / empty cost objects that would render as
+    // a rate-less Token at the route layer).
+    for row in &rows {
+        if let Some(cost) = row.cost.as_ref() {
+            assert!(
+                cost.input.is_some() || cost.output.is_some(),
+                "{}/{}: priced row must have an input or output rate",
+                row.provider,
+                row.wire_model_id
+            );
+        }
+    }
+
+    // A sampled priced row matches the in-repo USD table (crates/tui pricing).
+    let glm51 = find(&rows, "zai", "glm-5.1");
+    let cost = glm51.cost.as_ref().expect("glm-5.1 is priced");
+    assert_eq!(cost.input, Some(0.98));
+    assert_eq!(cost.output, Some(3.08));
+}

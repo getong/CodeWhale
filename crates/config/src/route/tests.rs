@@ -425,6 +425,30 @@ fn resolver_custom_endpoint_allows_namespaced_selector_for_strict_provider() {
 }
 
 #[test]
+fn resolver_explicit_custom_with_base_url_override_passes_model_through_verbatim() {
+    // #1519: an explicit `Custom` provider with a base_url override resolves via
+    // the LocalOrCustom pass-through, preserving even a namespaced selector as
+    // the verbatim wire id and binding the override endpoint + Chat Completions.
+    let r = RouteResolver::new();
+    let request = RouteRequest {
+        explicit_provider: Some(ProviderKind::Custom),
+        model_selector: Some(LogicalModelRef::from("vendor/custom-model-v1")),
+        saved_provider_model: None,
+        base_url_override: Some("https://api.example.com/v1".to_string()),
+    };
+    let out = r
+        .resolve(&request)
+        .expect("custom provider should resolve via pass-through");
+    assert_eq!(out.provider_kind, ProviderKind::Custom);
+    assert_eq!(out.provider_id.as_str(), "custom");
+    assert_eq!(out.wire_model_id.as_str(), "vendor/custom-model-v1");
+    assert_eq!(out.endpoint.base_url, "https://api.example.com/v1");
+    assert_eq!(out.protocol, crate::route::RequestProtocol::ChatCompletions);
+    assert!(out.validation.ok);
+    assert!(out.validation.messages.is_empty());
+}
+
+#[test]
 fn resolver_strict_direct_rejects_models_dev_offering_from_another_provider() {
     let r = models_dev_route_resolver();
     let out = r.resolve(&req(Some(ProviderKind::Deepseek), Some("glm-5.2")));
@@ -435,6 +459,86 @@ fn resolver_strict_direct_rejects_models_dev_offering_from_another_provider() {
         }
         other => panic!("expected ForeignModelForDirectProvider, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// #3385: the DEFAULT resolver now sources the bundled Models.dev catalog asset,
+// so real provider/model facts (context windows) reach candidates.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_resolver_yields_real_facts_from_bundled_catalog() {
+    let r = RouteResolver::new();
+
+    // A GLM row (Z.ai) resolves to a real, non-default context window — proof
+    // the bundled asset feeds the default resolver rather than the old 4-row
+    // seam, which only knew deepseek/together/openrouter and left everything
+    // else at `RouteLimits::default()` (unknown).
+    let glm = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("GLM-5.2")))
+        .expect("Z.ai GLM-5.2 should resolve from the bundled catalog");
+    assert_eq!(glm.provider_kind, ProviderKind::Zai);
+    assert_eq!(glm.wire_model_id.as_str(), "GLM-5.2");
+    assert_eq!(
+        glm.limits.context_tokens,
+        Some(1_000_000),
+        "GLM-5.2 must carry its real context window, not the unknown default"
+    );
+    assert_eq!(glm.limits.output_tokens, Some(131_072));
+    assert!(glm.limits.has_known_limit());
+
+    // A Kimi row (Moonshot) likewise resolves with its real window — a model
+    // the 4-row seam never knew about at all.
+    let kimi = r
+        .resolve(&req(Some(ProviderKind::Moonshot), Some("kimi-k2.7-code")))
+        .expect("Moonshot kimi-k2.7-code should resolve from the bundled catalog");
+    assert_eq!(kimi.limits.context_tokens, Some(262_144));
+    assert_eq!(kimi.limits.output_tokens, Some(262_144));
+
+    // With the #3085 pricing keystone present on the release branch, the asset's
+    // provider-scoped `cost` now projects onto the candidate via
+    // `route_pricing_sku`, so a priced Z.ai row carries a real per-token meter
+    // rather than `UnknownOrStale` — the "lighting up" that #3385 + #3085 deliver
+    // together.
+    let glm51 = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("glm-5.1")))
+        .expect("Z.ai glm-5.1 should resolve from the bundled catalog");
+    assert_eq!(glm51.limits.context_tokens, Some(202_752));
+    assert!(matches!(
+        glm51.pricing,
+        Some(super::candidate::PricingSku::Token { .. })
+    ));
+}
+
+#[test]
+fn default_resolver_preserves_seam_canonical_joins() {
+    // The bundled asset is merged UNDER the hand seam, so the seam's curated
+    // canonical-model joins still win: a DeepSeek-native selector keeps its
+    // canonical id, and an aggregator-prefixed wire id still maps back to the
+    // canonical DeepSeek model. (This is what keeps the existing route
+    // invariants green after the asset was wired in.)
+    let r = RouteResolver::new();
+
+    let direct = r
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
+        .expect("deepseek-v4-pro resolves");
+    assert_eq!(
+        direct.canonical_model.as_ref().map(ModelId::as_str),
+        Some("deepseek-v4-pro")
+    );
+
+    let hosted = r
+        .resolve(&req(
+            Some(ProviderKind::Together),
+            Some("deepseek-ai/DeepSeek-V4-Pro"),
+        ))
+        .expect("together hosted deepseek resolves");
+    assert_eq!(
+        hosted.canonical_model.as_ref().map(ModelId::as_str),
+        Some("deepseek-v4-pro"),
+        "seam canonical join must survive the asset merge"
+    );
+    assert_eq!(hosted.wire_model_id.as_str(), "deepseek-ai/DeepSeek-V4-Pro");
 }
 
 #[test]
@@ -539,4 +643,159 @@ fn resolver_protocol_matches_descriptor_for_every_provider() {
             "{kind:?} endpoint protocol"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #3085: honest pricing on resolved candidates.
+// ---------------------------------------------------------------------------
+
+/// A resolver whose single offering is a DeepSeek-priced catalog row, projected
+/// through the wired `CatalogOffering::to_offering` pricing seam.
+fn priced_deepseek_resolver() -> RouteResolver {
+    use crate::catalog::{CatalogOffering, CatalogSource};
+    use crate::models_dev::ModelsDevCost;
+
+    let priced = CatalogOffering {
+        provider: "deepseek".into(),
+        wire_model_id: "deepseek-v4-pro".into(),
+        canonical_model: Some("deepseek-v4-pro".into()),
+        endpoint_key: "chat".into(),
+        default_for_provider: true,
+        cost: Some(ModelsDevCost {
+            input: Some(0.28),
+            output: Some(0.42),
+            cache_read: Some(0.028),
+            cache_write: None,
+        }),
+        source: CatalogSource::Bundled,
+        ..Default::default()
+    };
+    RouteResolver::from_offerings(vec![priced.to_offering()])
+}
+
+#[test]
+fn priced_offering_yields_token_pricing_sku() {
+    use super::candidate::PricingSku;
+
+    let r = priced_deepseek_resolver();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
+        .expect("priced DeepSeek route should resolve");
+
+    match out.pricing {
+        Some(PricingSku::Token {
+            input_per_mtok,
+            output_per_mtok,
+        }) => {
+            assert_eq!(input_per_mtok, Some(0.28));
+            assert_eq!(output_per_mtok, Some(0.42));
+        }
+        other => panic!("expected Some(Token), got {other:?}"),
+    }
+}
+
+#[test]
+fn unpriced_offering_stays_unknown() {
+    use super::candidate::PricingSku;
+
+    // The bundled seam (`RouteResolver::new`) carries no sourced cost, so a
+    // matched offering must surface honest UnknownOrStale, never a fabricated
+    // zero price (#2608 / #3085 honesty rule).
+    let r = RouteResolver::new();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
+        .expect("bundled DeepSeek route should resolve");
+    assert!(
+        matches!(out.pricing, Some(PricingSku::UnknownOrStale)),
+        "bundled offering carries no price → UnknownOrStale, got {:?}",
+        out.pricing
+    );
+
+    // A pass-through route with no matched offering is likewise unknown.
+    let passthrough = r
+        .resolve(&req(Some(ProviderKind::Ollama), Some("my-local:7b")))
+        .expect("local passthrough should resolve");
+    assert!(matches!(
+        passthrough.pricing,
+        Some(PricingSku::UnknownOrStale)
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// #1519: advisory insecure-http warning, loopback-exempt.
+// ---------------------------------------------------------------------------
+
+/// Build a request with an explicit base-URL override.
+fn req_with_base(provider: ProviderKind, model: &str, base_url: &str) -> RouteRequest {
+    RouteRequest {
+        explicit_provider: Some(provider),
+        model_selector: Some(LogicalModelRef::from(model)),
+        saved_provider_model: None,
+        base_url_override: Some(base_url.to_string()),
+    }
+}
+
+#[test]
+fn http_custom_endpoint_emits_insecure_warning() {
+    let r = RouteResolver::new();
+    let out = r
+        .resolve(&req_with_base(
+            ProviderKind::Openai,
+            "gpt-whatever",
+            "http://example.com/v1",
+        ))
+        .expect("custom http endpoint should still resolve");
+
+    // Advisory only: the route stays usable.
+    assert!(
+        out.validation.ok,
+        "insecure http is advisory, not a hard fail"
+    );
+    assert!(
+        out.validation
+            .messages
+            .iter()
+            .any(|m| m.contains("insecure http")),
+        "expected an insecure-http advisory, got {:?}",
+        out.validation.messages
+    );
+}
+
+#[test]
+fn loopback_http_endpoint_does_not_warn() {
+    let r = RouteResolver::new();
+    // localhost, 127.0.0.1, and ::1 are all loopback and must stay clean.
+    for base in [
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:8000/v1",
+        "http://[::1]:8080/v1",
+    ] {
+        let out = r
+            .resolve(&req_with_base(ProviderKind::Ollama, "my-local:7b", base))
+            .unwrap_or_else(|e| panic!("loopback route {base} should resolve: {e}"));
+        assert!(out.validation.ok);
+        assert!(
+            out.validation.messages.is_empty(),
+            "loopback {base} must not warn, got {:?}",
+            out.validation.messages
+        );
+    }
+}
+
+#[test]
+fn https_endpoint_has_no_warning() {
+    let r = RouteResolver::new();
+    let out = r
+        .resolve(&req_with_base(
+            ProviderKind::Openai,
+            "gpt-whatever",
+            "https://example.com/v1",
+        ))
+        .expect("https endpoint should resolve");
+    assert!(out.validation.ok);
+    assert!(
+        out.validation.messages.is_empty(),
+        "https must not warn, got {:?}",
+        out.validation.messages
+    );
 }

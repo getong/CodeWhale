@@ -7,20 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.65] - 2026-06-24
+
 ### Added
 
+- **Provider/model/route resolution (EPIC #2608).** Canonical provider, model,
+  offering, and route types with a single `RouteResolver` that produces a
+  resolved `ReadyRouteCandidate` (endpoint, wire protocol, model id, context
+  limit, price) for every switch (#3458, #3084, #3384). The executing client is
+  now constructed from the resolved candidate rather than re-derived from config
+  (#3384). A committed, network-free Models.dev-shaped catalog gives models real
+  context windows and pricing, with a secret-free live cache (#3497, #3498,
+  #3385). Offering pricing with provenance is projected onto candidates (#3501,
+  #3085), and route limits feed a route-aware context-budget service (#3508,
+  #3523, #3086).
+- **Fleet execution substrate (EPIC #3154).** Fleet profile types and config
+  (#3469), durable manager resume, workspace agent-profile loading resolved into
+  the worker runtime (#3367), loadout intent carried in task specs (#3512), and
+  receipts that persist the resolved route for inspection (#3154, #3166). Worker
+  status is folded into the unified `/fleet` surface and exposed through the
+  Runtime API.
+- **Provider surfaces.** A `/provider` readiness dashboard with reasoning
+  readiness, an experimental/supported maturity marker, and an "open models for
+  this provider" action (#3083, #2984, #3485); cross-provider `/model` search
+  with scroll and provider type-ahead (#3484, #3075); inline `<think>`
+  reasoning-stream routing with per-provider overrides (#3222); usage telemetry
+  normalized into canonical token classes including Responses cache-miss and
+  reasoning tokens (#2961, #3509); and remote MCP OAuth login with bearer/header
+  auth precedence (#3527).
+- **More providers and routes.** User-defined OpenAI-compatible custom providers
+  via `[providers.<name>]` (#1519); a DeepSeek Anthropic-compatible route (#2963,
+  #3449); a Qianfan route (#3425); Zhipu folded into Z.ai with equal-treatment
+  model normalization (#3539); DashScope/Together fixtures.
 - **Localized mode picker and composer indicators.** The `/mode` picker prompt,
   mode names, and hints, plus the composer's Vim mode indicator, now render in
   all seven shipped locales (model-facing mode labels stay English). Harvested
   from #2239 by @gordonlu.
+- **Website and automation.** A runtime/integrations page, provenance and
+  mirror-trust copy, a fact-drift CI gate, a published install script, and a
+  weekly community digest archive on codewhale.net (#3419, #3421, #3415, #3482,
+  #3420); per-automation mode/shell/trust/approval settings (#3467).
 
 ### Changed
 
+- **Config modularization (#3311).** `ProviderKind` (#3505), harness posture
+  (#3507), and provider default seeds (#3503) moved into dedicated modules, and
+  the `config.rs` monolith split into clean leaf modules (paths, search,
+  model/base-URL constants, sub-agent limits) behind a `pub use` facade.
+  `AppMode` helpers were centralized (#3510), and mode-vs-permission policy is
+  now derived through a single `base_policy_for_mode` resolver instead of
+  scattered mutation (#3386, advisory review-intent behavior preserved).
+- **Leaner tool surface.** Dropped `task_shell_*` from the active set and folded
+  `tool_search_*` (#3463); ablated the in-turn loop_guard and encoded reasoning
+  dispositions (#3462); added the Orchestration disposition to the constitution.
+- **Routing.** Provider/model switches and the capability-aware fallback chain
+  resolve through `RouteResolver`; reasoning effort is normalized for the
+  *resolved* provider; the fallback chain now skips providers that lack auth
+  (#2574); and context window and memory-pressure come from the resolved route
+  (#3086).
+- **UX.** Approval modal gained a group divider and selected-row caret (#3515);
+  picker scroll/type-ahead and selection contrast hardened (#3500); the README
+  was rewritten as an architecture end-cap (#3087); and repo agent guidance was
+  de-hardcoded to live truth.
 - **Restored contributor credit.** Threaded machine-readable credit
   (`docs/CONTRIBUTORS.md` + `.github/AUTHOR_MAP`) for earlier merged work that
   shipped without it, including the `/jobs cancel-all` action and the npm
   retry-timeout hint (#1538) by @jieshu666, and the community ACP adapter
   reference by @rockeverm3m.
+
+### Fixed
+
+- **Release hygiene.** The strict `cargo clippy --workspace --all-targets --locked
+  -- -D warnings` gate passes; `npm run build` no longer dirties the generated
+  web facts; the site sets `metadataBase`; the community digest page parses each
+  record independently and localizes its chrome; and `cargo audit` is clean with
+  the starlark-transitive unmaintained advisories documented.
+- **Routing and mode correctness.** Ordinary prompt text is no longer
+  interpreted as a mode switch (#3387, #3491); model candidates are scoped to the
+  active provider; Together-owned DeepSeek routes are accepted (#3426); insecure
+  `http://` custom endpoints raise an advisory warning (#1519); and the Fleet
+  setup planner's role/model selection now drives the generated profile.
+- **Runtime stability.** MCP connection drops are explicit (#3524), HTTP API
+  calls reuse a shared MCP pool (#3532), and per-agent sub-agent mailbox
+  telemetry is throttled to cut UI lag (#3454).
 
 ## [0.8.64] - 2026-06-22
 
@@ -1392,102 +1461,6 @@ Thanks to **@xyuai** (#2587), **@IcedOranges** (#2584), **@BH8GCJ** (#2588),
 **@AresNing** (#2578), **@caiyilian** (#2567), **@buko** (#2369),
 **@gordonlu**, **@encyc**, and **@simuusang** (#2603, #2620) for reports,
 patches, retesting, and release-stabilization signals that shaped this pass.
-
-## [0.8.51] - 2026-06-02
-
-### Added
-
-- **Arcee AI as a direct provider.** New `[providers.arcee]` config block and
-  `ARCEE_API_KEY` / `ARCEE_BASE_URL` / `ARCEE_MODEL` environment variables,
-  wired through CLI auth (`codewhale auth set --provider arcee`), the TUI
-  provider picker, and the model registry. The default direct-API model is
-  `trinity-large-thinking` (reasoning-capable, 262K context and 262K max
-  output); `trinity-large-preview` (262K context, non-reasoning) and
-  `trinity-mini` (128K context) are also selectable. OpenRouter's
-  `arcee-ai/trinity-large-thinking` route remains separate.
-- **Arcee Cloudflare-WAF compatibility.** The opening turn to the Arcee gateway
-  uses a benign read-only tool surface (`read_file`, `list_dir`, `file_search`,
-  `grep_files`, `git_status`, `git_diff`, `checklist_write`, `update_plan`) and
-  splits example payloads such as `python -c …` out of the system prompt, so the
-  WAF does not reject the first request; the full tool catalog stays reachable
-  through tool-search. `trinity-large-thinking`'s `reasoning_content` is
-  recognized and replayed on tool-call turns.
-- **Expanded model catalog.** Added context-window, max-output, and
-  reasoning-capability metadata for additional model IDs, including
-  `qwen/qwen3.6-flash`, `qwen/qwen3.6-plus`, `qwen/qwen3.6-max-preview`, and
-  Xiaomi MiMo v2.5 chat/ASR/TTS variants; `trinity-large-preview`'s context
-  window was corrected to 262K.
-- **Provider-aware model picker.** The picker groups models by provider, shows
-  per-model hints, and remembers a saved model per provider.
-
-### Changed
-
-- **Auto-compaction is now percentage- and model-aware.** The per-model
-  threshold helper is `compaction_threshold_for_model_at_percent(model,
-  percent)` (replacing the effort-based variant), and the default
-  `auto_compact_threshold_percent` is 80%. Auto-compaction defaults on for
-  models with a context window of 256K or smaller and stays opt-in for 1M-token
-  models (e.g. DeepSeek V4) to protect prefix-cache economics, unless the user
-  has explicitly set `auto_compact`.
-- **Clearer provider/gateway errors.** HTTP error bodies are sanitized before
-  display — HTML interstitials and Cloudflare "Access Denied" pages collapse to
-  a one-line reason (with the ray/error ID) instead of dumping raw markup into
-  the transcript — and 403s are split into authentication vs. authorization
-  (gateway/WAF block) categories.
-- The invalid-model error now names the active provider and lists Arcee among
-  the options.
-
-### Removed
-
-- **The session "cycle" / checkpoint-restart system.** Removed the `/cycles`,
-  `/cycle <n>`, and `/recall` commands, the `recall_archive` tool, the
-  cycle-handoff briefing prompt, the sidebar "cycles" lines, and the
-  `cycle_manager` engine plumbing (`EngineConfig.cycle`, `Event::CycleAdvanced`,
-  seam-manager cycle thresholds and flash briefings). Long sessions no longer
-  auto-reset their context at a fixed token boundary — reclaim budget with
-  `/compact` or model-aware auto-compaction instead. Existing on-disk cycle
-  archives are left untouched but are no longer read or written.
-
-### Fixed
-
-- Assistant turns no longer leave an orphaned role glyph (the stray "blue dot")
-  when a turn streams only whitespace between reasoning and a tool call.
-- Scrolling the mouse wheel over the right-hand sidebar no longer leaks into the
-  transcript scroll.
-- The sidebar hover tooltip now appears only for truncated lines, sits below the
-  cursor, and uses a neutral surface color instead of the warning-orange
-  highlight that overlapped neighbouring rows.
-- Corrected the README's description of the Constitution (Article VII is the
-  hierarchy itself; Article II's truth duty overrides even a user request) to
-  match `prompts/base.md`.
-- Repaired release-blocking unit and integration tests left failing by the
-  cycle-removal and compaction-threshold refactors (relay instruction,
-  model-reject message, compaction budget, mock-LLM threshold helper).
-- Fixed DEC private-mode CSI fragment leakage into composer text after
-  terminal resets, restoring clean prompt editing (#2592).
-- The engine now recovers from turn-level panics instead of killing the
-  main event loop, keeping the session alive through transient failures
-  (#2583, #1269).
-- Deeply nested files are now discoverable via @-mention and Ctrl+P file
-  picker; the default walk depth was relaxed to handle monorepo layouts (#2488).
-- Command-palette selection stays visible when scrolling through long lists
-  instead of scrolling off-screen (#2590).
-- exec_shell child processes now inherit .NET/NuGet and Windows app-data
-  environment variables, fixing toolchain resolution on Windows (#1857).
-- A warning is emitted when shell/sandbox config keys are nested under
-  unknown top-level sections instead of being silently ignored (#2589).
-- Diff-render now preserves leading whitespace in patch content lines,
-  fixing an extra-space regression in PR previews (#2591). Thanks @zlh124.
-- Model selection from the /model command now persists per-provider across
-  restarts, with a warning when persistence fails.
-
-### Community
-
-Thanks to **@zlh124** (#2591) and **@reidliu41** (#2601) for the fixes
-harvested into this release. Thanks also to **@idling11** (#2602),
-**@gordonlu** (#2585), **@cyq1017** (#2593), **@xyuai** (#2587, #2584),
-and **@IcedOranges** (#2584) for reports, drafts, and investigations
-that shaped this release cycle.
 
 ---
 

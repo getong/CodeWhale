@@ -7,20 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.65] - 2026-06-24
+
 ### Added
 
+- **Provider/model/route resolution (EPIC #2608).** Canonical provider, model,
+  offering, and route types with a single `RouteResolver` that produces a
+  resolved `ReadyRouteCandidate` (endpoint, wire protocol, model id, context
+  limit, price) for every switch (#3458, #3084, #3384). The executing client is
+  now constructed from the resolved candidate rather than re-derived from config
+  (#3384). A committed, network-free Models.dev-shaped catalog gives models real
+  context windows and pricing, with a secret-free live cache (#3497, #3498,
+  #3385). Offering pricing with provenance is projected onto candidates (#3501,
+  #3085), and route limits feed a route-aware context-budget service (#3508,
+  #3523, #3086).
+- **Fleet execution substrate (EPIC #3154).** Fleet profile types and config
+  (#3469), durable manager resume, workspace agent-profile loading resolved into
+  the worker runtime (#3367), loadout intent carried in task specs (#3512), and
+  receipts that persist the resolved route for inspection (#3154, #3166). Worker
+  status is folded into the unified `/fleet` surface and exposed through the
+  Runtime API.
+- **Provider surfaces.** A `/provider` readiness dashboard with reasoning
+  readiness, an experimental/supported maturity marker, and an "open models for
+  this provider" action (#3083, #2984, #3485); cross-provider `/model` search
+  with scroll and provider type-ahead (#3484, #3075); inline `<think>`
+  reasoning-stream routing with per-provider overrides (#3222); usage telemetry
+  normalized into canonical token classes including Responses cache-miss and
+  reasoning tokens (#2961, #3509); and remote MCP OAuth login with bearer/header
+  auth precedence (#3527).
+- **More providers and routes.** User-defined OpenAI-compatible custom providers
+  via `[providers.<name>]` (#1519); a DeepSeek Anthropic-compatible route (#2963,
+  #3449); a Qianfan route (#3425); Zhipu folded into Z.ai with equal-treatment
+  model normalization (#3539); DashScope/Together fixtures.
 - **Localized mode picker and composer indicators.** The `/mode` picker prompt,
   mode names, and hints, plus the composer's Vim mode indicator, now render in
   all seven shipped locales (model-facing mode labels stay English). Harvested
   from #2239 by @gordonlu.
+- **Website and automation.** A runtime/integrations page, provenance and
+  mirror-trust copy, a fact-drift CI gate, a published install script, and a
+  weekly community digest archive on codewhale.net (#3419, #3421, #3415, #3482,
+  #3420); per-automation mode/shell/trust/approval settings (#3467).
 
 ### Changed
 
+- **Config modularization (#3311).** `ProviderKind` (#3505), harness posture
+  (#3507), and provider default seeds (#3503) moved into dedicated modules, and
+  the `config.rs` monolith split into clean leaf modules (paths, search,
+  model/base-URL constants, sub-agent limits) behind a `pub use` facade.
+  `AppMode` helpers were centralized (#3510), and mode-vs-permission policy is
+  now derived through a single `base_policy_for_mode` resolver instead of
+  scattered mutation (#3386, advisory review-intent behavior preserved).
+- **Leaner tool surface.** Dropped `task_shell_*` from the active set and folded
+  `tool_search_*` (#3463); ablated the in-turn loop_guard and encoded reasoning
+  dispositions (#3462); added the Orchestration disposition to the constitution.
+- **Routing.** Provider/model switches and the capability-aware fallback chain
+  resolve through `RouteResolver`; reasoning effort is normalized for the
+  *resolved* provider; the fallback chain now skips providers that lack auth
+  (#2574); and context window and memory-pressure come from the resolved route
+  (#3086).
+- **UX.** Approval modal gained a group divider and selected-row caret (#3515);
+  picker scroll/type-ahead and selection contrast hardened (#3500); the README
+  was rewritten as an architecture end-cap (#3087); and repo agent guidance was
+  de-hardcoded to live truth.
 - **Restored contributor credit.** Threaded machine-readable credit
   (`docs/CONTRIBUTORS.md` + `.github/AUTHOR_MAP`) for earlier merged work that
   shipped without it, including the `/jobs cancel-all` action and the npm
   retry-timeout hint (#1538) by @jieshu666, and the community ACP adapter
   reference by @rockeverm3m.
+
+### Fixed
+
+- **Release hygiene.** The strict `cargo clippy --workspace --all-targets --locked
+  -- -D warnings` gate passes; `npm run build` no longer dirties the generated
+  web facts; the site sets `metadataBase`; the community digest page parses each
+  record independently and localizes its chrome; and `cargo audit` is clean with
+  the starlark-transitive unmaintained advisories documented.
+- **Routing and mode correctness.** Ordinary prompt text is no longer
+  interpreted as a mode switch (#3387, #3491); model candidates are scoped to the
+  active provider; Together-owned DeepSeek routes are accepted (#3426); insecure
+  `http://` custom endpoints raise an advisory warning (#1519); and the Fleet
+  setup planner's role/model selection now drives the generated profile.
+- **Runtime stability.** MCP connection drops are explicit (#3524), HTTP API
+  calls reuse a shared MCP pool (#3532), and per-agent sub-agent mailbox
+  telemetry is throttled to cut UI lag (#3454).
 
 ## [0.8.64] - 2026-06-22
 
@@ -2361,6 +2430,7 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
 [Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.64...HEAD
+[0.8.65]: https://github.com/Hmbown/CodeWhale/compare/v0.8.64...v0.8.65
 [0.8.64]: https://github.com/Hmbown/CodeWhale/compare/v0.8.63...v0.8.64
 [0.8.63]: https://github.com/Hmbown/CodeWhale/compare/v0.8.62...v0.8.63
 [0.8.62]: https://github.com/Hmbown/CodeWhale/compare/v0.8.61...v0.8.62

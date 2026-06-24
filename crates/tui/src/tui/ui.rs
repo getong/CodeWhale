@@ -6730,7 +6730,7 @@ async fn switch_provider(
     let next_config = resolved_route.config;
     let new_model = resolved_route.model;
 
-    if let Err(err) = DeepSeekClient::new(&next_config) {
+    if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
         app.pending_provider_switch = None;
         app.add_message(HistoryCell::System {
             content: format!(
@@ -6868,7 +6868,7 @@ async fn apply_provider_fallback_switch(
     let next_config = resolved_route.config;
     let new_model = resolved_route.model;
 
-    if let Err(err) = DeepSeekClient::new(&next_config) {
+    if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
         app.api_provider = previous_provider;
         app.last_fallback_reason = Some(format!(
             "Fallback provider {} was unavailable: {err}",
@@ -8348,6 +8348,7 @@ fn render(f: &mut Frame, app: &mut App) {
             crate::config::ApiProvider::Zai => Some("Z.ai"),
             crate::config::ApiProvider::Stepfun => Some("StepFun"),
             crate::config::ApiProvider::Minimax => Some("MiniMax"),
+            crate::config::ApiProvider::Custom => Some("Custom"),
         };
         let status_indicator_started_at = if app.low_motion {
             None
@@ -8747,6 +8748,27 @@ fn toggle_live_transcript_overlay(app: &mut App) {
     app.needs_redraw = true;
 }
 
+/// Open the `/model` picker pre-filtered to `provider` (#3083). The model
+/// picker's search already scopes rows by provider display name, so we reuse
+/// the standard "open model picker" path and seed its query by replaying the
+/// provider's display name as character input through the public view-stack
+/// key path — no model-picker internals are touched.
+fn open_model_picker_for_provider(app: &mut App, provider: crate::config::ApiProvider) {
+    if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
+        app.view_stack
+            .push(crate::tui::model_picker::ModelPickerView::new(app));
+    }
+    for ch in provider.display_name().chars() {
+        // Char input updates the query and never emits a ViewEvent, so the
+        // returned (empty) event list is safe to drop.
+        let _ = app.view_stack.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        ));
+    }
+    app.needs_redraw = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_view_events(
     terminal: &mut AppTerminal,
@@ -9093,6 +9115,9 @@ async fn handle_view_events(
                     "Linked Kimi CLI OAuth",
                 )
                 .await;
+            }
+            ViewEvent::ProviderPickerOpenModels { provider } => {
+                open_model_picker_for_provider(app, provider);
             }
             ViewEvent::ModeSelected { mode } => {
                 let prior_mode = app.mode;
@@ -9457,6 +9482,13 @@ async fn apply_provider_picker_api_key(
     if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
         config.api_key = Some(api_key);
     } else {
+        // Capture the custom entry key before borrowing `providers` (#1519).
+        let custom_key = (provider == ApiProvider::Custom).then(|| {
+            config
+                .provider
+                .clone()
+                .unwrap_or_else(|| "__custom__".to_string())
+        });
         let providers = config
             .providers
             .get_or_insert_with(ProvidersConfig::default);
@@ -9465,6 +9497,10 @@ async fn apply_provider_picker_api_key(
                 // Guarded by the outer `if` above; safety net against refactors.
                 return;
             }
+            ApiProvider::Custom => providers
+                .custom
+                .entry(custom_key.expect("custom key captured for custom provider"))
+                .or_default(),
             ApiProvider::DeepseekAnthropic => &mut providers.deepseek_anthropic,
             ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
             ApiProvider::Openai => &mut providers.openai,
@@ -9526,11 +9562,23 @@ async fn apply_provider_picker_auth_mode(
 }
 
 fn set_provider_auth_mode_in_memory(config: &mut Config, provider: ApiProvider, auth_mode: String) {
+    // Capture the custom entry key (the selected provider name) before the
+    // mutable borrow of `providers` below (#1519).
+    let custom_key = (provider == ApiProvider::Custom).then(|| {
+        config
+            .provider
+            .clone()
+            .unwrap_or_else(|| "__custom__".to_string())
+    });
     let providers = config
         .providers
         .get_or_insert_with(ProvidersConfig::default);
     let entry: &mut ProviderConfig = match provider {
         ApiProvider::Deepseek | ApiProvider::DeepseekCN => return,
+        ApiProvider::Custom => providers
+            .custom
+            .entry(custom_key.expect("custom key captured for custom provider"))
+            .or_default(),
         ApiProvider::DeepseekAnthropic => &mut providers.deepseek_anthropic,
         ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
         ApiProvider::Openai => &mut providers.openai,

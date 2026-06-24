@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
+use codewhale_config::route::ReadyRouteCandidate;
+
 use crate::config::{ApiProvider, Config, RetryPolicy, wire_model_for_provider};
 use crate::llm_client::{
     LlmClient, LlmError, RetryConfig as LlmRetryConfig, extract_retry_after,
@@ -640,12 +642,36 @@ fn add_extra_root_certs(
 impl DeepSeekClient {
     /// Create a DeepSeek client from CLI configuration.
     pub fn new(config: &Config) -> Result<Self> {
+        Self::from_parts(config.deepseek_base_url(), config.default_model(), config)
+    }
+
+    /// Create a DeepSeek client whose transport is bound to a runtime-resolved
+    /// route (#3384).
+    ///
+    /// The base URL and default model come from the executable `candidate`, so
+    /// the client talks to exactly the endpoint and wire model the resolver
+    /// chose instead of re-deriving them from `Config`. Secrets stay in
+    /// `Config`: `ReadyRouteCandidate` is secret-free by design (it carries only
+    /// an auth-source *class*), so the API key and provider are still read from
+    /// `config`.
+    pub fn from_candidate(config: &Config, candidate: &ReadyRouteCandidate) -> Result<Self> {
+        Self::from_parts(
+            candidate.endpoint.base_url.clone(),
+            candidate.wire_model_id.as_str().to_string(),
+            config,
+        )
+    }
+
+    /// Shared constructor body for [`Self::new`] and [`Self::from_candidate`].
+    ///
+    /// `base_url` and `default_model` are the only inputs that differ between
+    /// the two entry points; everything else (auth, provider, retry, headers,
+    /// timeouts) is derived from `config` so the two paths cannot drift.
+    fn from_parts(base_url: String, default_model: String, config: &Config) -> Result<Self> {
         let api_key = config.deepseek_api_key()?;
-        let base_url = config.deepseek_base_url();
         let api_provider = config.api_provider();
         validate_base_url_security(&base_url)?;
         let retry = config.retry_policy();
-        let default_model = config.default_model();
         let stream_idle_timeout = Duration::from_secs(config.stream_chunk_timeout_secs());
         let http_headers = config.http_headers();
         let insecure_skip_tls_verify = config.insecure_skip_tls_verify();
@@ -1432,7 +1458,8 @@ pub(super) fn apply_reasoning_effort(
             | ApiProvider::WanjieArk
             | ApiProvider::Qianfan
             | ApiProvider::Arcee
-            | ApiProvider::Huggingface => {}
+            | ApiProvider::Huggingface
+            | ApiProvider::Custom => {}
             ApiProvider::Moonshot => {
                 // #3024: Kimi models accept thinking enable/disable.
                 body["thinking"] = json!({ "type": "disabled" });
@@ -1512,7 +1539,8 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Openai
             | ApiProvider::WanjieArk
             | ApiProvider::Qianfan
-            | ApiProvider::OpenaiCodex => {}
+            | ApiProvider::OpenaiCodex
+            | ApiProvider::Custom => {}
             ApiProvider::Moonshot => {
                 // #3024: Kimi models accept thinking enable.
                 body["thinking"] = json!({ "type": "enabled" });
@@ -1579,7 +1607,8 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Openai
             | ApiProvider::WanjieArk
             | ApiProvider::Qianfan
-            | ApiProvider::OpenaiCodex => {}
+            | ApiProvider::OpenaiCodex
+            | ApiProvider::Custom => {}
             ApiProvider::Moonshot => {
                 // #3024: Kimi models accept thinking enable.
                 body["thinking"] = json!({ "type": "enabled" });
@@ -1789,11 +1818,13 @@ mod tests {
 
     fn deepseek_anthropic_client(server: &MockServer) -> DeepSeekClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut providers = ProvidersConfig::default();
-        providers.deepseek_anthropic = ProviderConfig {
-            api_key: Some("ds-test".to_string()),
-            base_url: Some(server.uri()),
-            ..ProviderConfig::default()
+        let providers = ProvidersConfig {
+            deepseek_anthropic: ProviderConfig {
+                api_key: Some("ds-test".to_string()),
+                base_url: Some(server.uri()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
         };
         DeepSeekClient::new(&Config {
             provider: Some("deepseek-anthropic".to_string()),
@@ -4456,5 +4487,113 @@ mod tests {
     fn extract_sse_data_value_rejects_non_data_lines() {
         assert_eq!(extract_sse_data_value("event: message"), None);
         assert_eq!(extract_sse_data_value(": heartbeat"), None);
+    }
+
+    /// Build a DeepSeek config with an inline key/base URL plus the resolved
+    /// runtime route for it. `RouteResolver` (reached through
+    /// `resolve_runtime_route`) is the only producer of `ReadyRouteCandidate`,
+    /// so we mint candidates the same way the engine does at switch time.
+    fn deepseek_route_for_test(
+        base_url: &str,
+        model: &str,
+    ) -> (Config, crate::route_runtime::ResolvedRuntimeRoute) {
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            api_key: Some("ds-test".to_string()),
+            base_url: Some(base_url.to_string()),
+            default_text_model: Some(model.to_string()),
+            ..Config::default()
+        };
+        let route = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Deepseek,
+            Some(model),
+        )
+        .expect("deepseek route should resolve");
+        (config, route)
+    }
+
+    #[test]
+    fn from_candidate_uses_candidate_base_url_and_wire_model() {
+        let (_config, route) =
+            deepseek_route_for_test("https://route.example.com/v1", "deepseek-v4-pro");
+
+        let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+            .expect("client should construct from candidate");
+
+        // The transport is bound to the candidate, not re-derived from Config.
+        assert_eq!(client.base_url, route.candidate.endpoint.base_url);
+        assert_eq!(client.default_model, route.candidate.wire_model_id.as_str());
+    }
+
+    #[test]
+    fn from_candidate_matches_new_when_config_agrees() {
+        // For a normal route, the resolver writes the candidate's wire model and
+        // endpoint back into `route.config`, so constructing from the candidate
+        // must be byte-identical to constructing from that config. This pins the
+        // "no behavior change today" guarantee for Slice A.
+        let (_config, route) =
+            deepseek_route_for_test("https://api.deepseek.com/v1", "deepseek-v4-pro");
+
+        let from_new = DeepSeekClient::new(&route.config).expect("new client");
+        let from_candidate = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+            .expect("candidate client");
+
+        assert_eq!(from_candidate.base_url, from_new.base_url);
+        assert_eq!(from_candidate.default_model, from_new.default_model);
+        assert_eq!(from_candidate.api_provider, from_new.api_provider);
+    }
+
+    #[test]
+    fn from_candidate_binds_custom_provider_base_url_and_model() {
+        // #1519: a custom OpenAI-compatible provider resolves to a candidate
+        // whose endpoint/model come from the named `[providers.<name>]` table,
+        // and `from_candidate` must bind that verbatim base URL + wire model.
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            "my_thing".to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("https://api.example.com/v1".to_string()),
+                model: Some("custom-model-v1".to_string()),
+                api_key_env: Some("EXAMPLE_API_KEY_FROM_CANDIDATE_TEST".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = Config {
+            provider: Some("my_thing".to_string()),
+            providers: Some(ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+
+        // The config names a custom provider, so it must resolve as Custom.
+        assert_eq!(config.api_provider(), ApiProvider::Custom);
+
+        let route = crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Custom, None)
+            .expect("custom route should resolve");
+
+        // Provide the key the route's auth path will read.
+        // SAFETY: single-threaded unit test mutating a uniquely-named var.
+        unsafe {
+            std::env::set_var("EXAMPLE_API_KEY_FROM_CANDIDATE_TEST", "sk-custom");
+        }
+        let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+            .expect("client should construct from custom candidate");
+        unsafe {
+            std::env::remove_var("EXAMPLE_API_KEY_FROM_CANDIDATE_TEST");
+        }
+
+        assert_eq!(client.base_url, "https://api.example.com/v1");
+        assert_eq!(client.default_model, "custom-model-v1");
+        assert_eq!(client.api_provider, ApiProvider::Custom);
+        // The candidate carried the custom endpoint + verbatim wire model.
+        assert_eq!(
+            route.candidate.endpoint.base_url,
+            "https://api.example.com/v1"
+        );
+        assert_eq!(route.candidate.wire_model_id.as_str(), "custom-model-v1");
     }
 }

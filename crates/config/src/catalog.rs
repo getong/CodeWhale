@@ -112,7 +112,11 @@ impl CatalogOffering {
     /// Project the minimal routing identity the resolver consumes.
     ///
     /// The catalog deliberately carries richer facts than routing needs; this
-    /// drops them so `RouteResolver::from_offerings` stays the single seam.
+    /// drops most of them so `RouteResolver::from_offerings` stays the single
+    /// seam. The route-facing pricing meter is the exception: it is projected
+    /// here (where the offering's sourced `cost` is in scope) via
+    /// [`crate::pricing::route_pricing_sku`] so a resolved candidate can carry
+    /// honest pricing without the route layer ever seeing raw cost (#3085).
     #[must_use]
     pub fn to_offering(&self) -> ProviderModelOffering {
         ProviderModelOffering {
@@ -126,6 +130,7 @@ impl CatalogOffering {
                 .as_ref()
                 .map(RouteLimits::from)
                 .unwrap_or_default(),
+            pricing: crate::pricing::route_pricing_sku(self),
         }
     }
 
@@ -133,6 +138,39 @@ impl CatalogOffering {
     fn merge_key(&self) -> (String, String) {
         (self.provider.clone(), self.wire_model_id.clone())
     }
+}
+
+/// The committed, network-free Models.dev-shaped catalog snapshot (#3385).
+///
+/// Curated from in-repo verified model facts (context windows / output caps from
+/// `crates/tui/src/models.rs`, USD pricing from `crates/tui/src/pricing.rs`)
+/// rather than a live models.dev dump, because the public catalog tracks a
+/// different real model generation than CodeWhale's curated forward-dated set.
+/// This is the default bundled layer feeding [`crate::route::RouteResolver::new`].
+/// See the asset's `_meta` block for sourcing and the honesty rule on omitted
+/// pricing (`UnknownOrStale`, never a fabricated zero).
+pub const BUNDLED_MODELS_DEV_JSON: &str = include_str!("../assets/models_dev.bundled.json");
+
+/// Parse the committed bundled Models.dev snapshot.
+///
+/// # Panics
+/// Panics only if the committed asset is not valid Models.dev JSON. The
+/// `tests::bundled_asset_parses` guard makes that a build-time failure, so this
+/// never panics in shipped builds.
+#[must_use]
+pub fn bundled_models_dev_catalog() -> ModelsDevCatalog {
+    ModelsDevCatalog::parse_json(BUNDLED_MODELS_DEV_JSON)
+        .expect("committed bundled Models.dev asset must be valid JSON")
+}
+
+/// The bundled-layer [`CatalogOffering`] rows from the committed snapshot.
+///
+/// This is the real-data source for the default resolver: every text-chat row
+/// from [`BUNDLED_MODELS_DEV_JSON`], tagged [`CatalogSource::Bundled`], with
+/// honest limits and pricing.
+#[must_use]
+pub fn bundled_catalog_offerings() -> Vec<CatalogOffering> {
+    bundled_offerings_from_models_dev(&bundled_models_dev_catalog())
 }
 
 /// Hydrate bundled [`CatalogOffering`] rows from a parsed Models.dev catalog.
