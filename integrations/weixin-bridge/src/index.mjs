@@ -24,69 +24,15 @@ import {
   activeTurnBlock,
   helpText,
 } from "./lib.mjs";
+import { ThreadStore as CoreThreadStore } from "../../bridge-core/src/lib.mjs";
 
 // ============================================================================
 // ThreadStore — JSON 文件持久化（与 feishu/telegram/wechat bridge 一致）
 // ============================================================================
 
-class ThreadStore {
-  static async open(filePath) {
-    const store = new ThreadStore(filePath);
-    await store.load();
-    return store;
-  }
-
+class ThreadStore extends CoreThreadStore {
   constructor(filePath) {
-    this.filePath = filePath;
-    this.data = { chats: {}, messages: [] };
-  }
-
-  async load() {
-    try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      this.data = JSON.parse(raw);
-      if (!this.data.chats) this.data.chats = {};
-      if (!Array.isArray(this.data.messages)) this.data.messages = [];
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
-
-  async recordMessage(messageKey) {
-    if (!messageKey) return false;
-    if (!Array.isArray(this.data.messages)) this.data.messages = [];
-    if (this.data.messages.includes(messageKey)) return true;
-    this.data.messages.push(messageKey);
-    this.data.messages = this.data.messages.slice(-500);
-    await this.save();
-    return false;
-  }
-
-  async getChat(chatId) {
-    return this.data.chats[chatId] || null;
-  }
-
-  async setChat(chatId, state) {
-    this.data.chats[chatId] = state;
-    await this.save();
-    return state;
-  }
-
-  async patchChat(chatId, patch) {
-    const current = this.data.chats[chatId] || {};
-    this.data.chats[chatId] = { ...current, ...patch };
-    await this.save();
-    return this.data.chats[chatId];
-  }
-
-  async save() {
-    const dir = path.dirname(this.filePath);
-    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-    const tmp = `${this.filePath}.tmp`;
-    await fs.writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    await fs.rename(tmp, this.filePath);
+    super(filePath, { messageLimit: 500 });
   }
 }
 
