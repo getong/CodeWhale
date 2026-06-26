@@ -887,10 +887,9 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # args = []
 # language_id = "csharp"
 #
-# [lsp.custom.php]
-# command = "intelephense"
-# args = ["--stdio"]
-# language_id = "php"
+# [lsp.custom.swift]
+# command = "sourcekit-lsp"
+# language_id = "swift"
 [lsp]
 # enabled = true
 # poll_after_edit_ms = 5000
