@@ -581,16 +581,30 @@ mod tests {
     /// group-local `CommandInfo` statics and `dispatch()` in `mod.rs` rather
     /// than extracting every command into a focused module. This is accepted
     /// final structure per FEAT-008 §3.2.
+    ///
+    /// Enforcement strategy:
+    /// - Exactly 9 source-verified groups (from `groups/mod.rs`)
+    /// - Each group owns its commands() list
+    /// - Config and debug exceptions verified within their specific groups by
+    ///   identifying the group through its first command ("config" and "tokens")
+    /// - Not circular: the group-iterated command count is a consistency check;
+    ///   the primary enforcement is exact group count + per-group non-empty + valid metadata
     #[test]
     fn command_ownership_contract_is_enforced() {
         let groups = groups::all_command_groups();
-        assert!(
-            groups.len() >= 9,
-            "expected at least 9 command groups, got {}",
+
+        // AT-009 primary: exactly 9 groups matching groups/mod.rs
+        assert_eq!(
+            groups.len(),
+            9,
+            "expected exactly 9 command groups (core, session, config, debug, \
+             project, skills, memory, plugins, utility), got {}",
             groups.len()
         );
 
         let mut total_commands = 0;
+        let mut has_config = false;
+        let mut has_debug = false;
         for group in &groups {
             let commands = group.commands();
             assert!(
@@ -616,43 +630,40 @@ mod tests {
                 );
             }
             total_commands += commands.len();
+
+            // Identify config and debug groups by their command content to
+            // verify permanent-exception counts within the correct group.
+            if commands.iter().any(|c| c.info().name == "config") {
+                has_config = true;
+                assert_eq!(
+                    commands.len(),
+                    11,
+                    "config group (group-local metadata exception) expected \
+                     exactly 11 commands, got {}",
+                    commands.len()
+                );
+            }
+            if commands.iter().any(|c| c.info().name == "tokens") {
+                has_debug = true;
+                assert_eq!(
+                    commands.len(),
+                    11,
+                    "debug group (group-local metadata exception) expected \
+                     exactly 11 commands, got {}",
+                    commands.len()
+                );
+            }
         }
 
-        // The total command count from group iteration must match the registry.
+        // Config and debug groups must be found and verified by content identity
+        assert!(has_config, "config group not found (expected first command: /config)");
+        assert!(has_debug, "debug group not found (expected first command: /tokens)");
+
+        // Consistency: group-iterated command count must match registry
         assert_eq!(
             total_commands,
             command_infos().len(),
             "group-iterated command count must match registry infos count"
-        );
-
-        // Config and debug are the only groups with group-local metadata in
-        // mod.rs rather than per-command RegisterCommand modules. Verify they
-        // still have the expected number of commands.
-        let mut config_count = 0usize;
-        let mut debug_count = 0usize;
-        for group in &groups {
-            let cmds = group.commands();
-            for cmd in &cmds {
-                match cmd.info().name {
-                    "config" | "sidebar" | "settings" | "status" | "statusline" | "mode"
-                    | "theme" | "verbose" | "trust" | "logout" | "debt" => {
-                        config_count += 1;
-                    }
-                    "tokens" | "cost" | "balance" | "cache" | "change" | "system" | "context"
-                    | "edit" | "diff" | "undo" | "retry" => {
-                        debug_count += 1;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        assert!(
-            config_count >= 11,
-            "config group expected >=11 commands, got {config_count}"
-        );
-        assert!(
-            debug_count >= 11,
-            "debug group expected >=11 commands, got {debug_count}"
         );
     }
 
