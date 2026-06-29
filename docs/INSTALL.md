@@ -694,6 +694,23 @@ Install the C toolchain:
 sudo apt-get install -y build-essential pkg-config libdbus-1-dev
 ```
 
+### WSL2 / Ubuntu: `dbus-1` or `pkg-config` not found while building
+
+WSL2 uses the same Linux source-build path as Ubuntu. If `cargo install
+codewhale-tui --locked` fails while compiling the keyring or D-Bus secret
+storage crates, install the Linux build dependencies inside the WSL distro,
+then rerun both Cargo install commands:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+cargo install codewhale-cli --locked
+cargo install codewhale-tui --locked
+```
+
+The prebuilt npm/GitHub binaries do not need these build-time packages; they
+only apply when WSL2 is compiling CodeWhale from source.
+
 ### Wrapper installs but `codewhale` isn't found
 
 `npm i -g` installs into `$(npm prefix -g)/bin`; make sure that directory is on
