@@ -325,7 +325,11 @@ fn headless_worker_records_persist_with_subagent_state() {
     result.name = "agent_persisted".to_string();
     result.steps_taken = 3;
     manager.complete_worker_from_result("agent_persisted", &result);
-    manager.persist_state().expect("persist state");
+    manager
+        .persist_state()
+        .expect("persist state")
+        .join()
+        .expect("persist thread");
 
     let mut loaded = SubAgentManager::new(tmp.path().to_path_buf(), 4).with_state_path(state_path);
     loaded.load_state().expect("load state");
@@ -2581,7 +2585,11 @@ fn test_persist_and_reload_marks_running_agent_as_interrupted() {
     );
     let running_id = running.id.clone();
     manager.agents.insert(running_id.clone(), running);
-    manager.persist_state().expect("persist state");
+    manager
+        .persist_state()
+        .expect("persist state")
+        .join()
+        .expect("persist thread");
 
     let mut reloaded = SubAgentManager::new(workspace, 2)
         .with_state_path(default_state_path(tmp.path()).expect("default state path"));
@@ -2626,7 +2634,11 @@ fn persist_and_reload_preserves_checkpoint_for_interrupted_running_agent() {
     ));
     let running_id = running.id.clone();
     manager.agents.insert(running_id.clone(), running);
-    manager.persist_state().expect("persist state");
+    manager
+        .persist_state()
+        .expect("persist state")
+        .join()
+        .expect("persist thread");
 
     let mut reloaded = SubAgentManager::new(workspace, 2)
         .with_state_path(default_state_path(tmp.path()).expect("default state path"));
@@ -3958,7 +3970,9 @@ fn persist_round_trip_preserves_session_boot_id() {
         );
         writer
             .persist_state()
-            .expect("persist round-trip should write");
+            .expect("persist round-trip should write")
+            .join()
+            .expect("persist thread");
     }
 
     // A fresh manager comes up with a *different* boot id and reloads

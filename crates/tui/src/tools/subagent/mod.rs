@@ -1920,9 +1920,14 @@ impl SubAgentManager {
         }
     }
 
-    fn persist_state(&self) -> Result<()> {
+    /// Build the [`PersistedSubAgentState`] snapshot from the current fleet.
+    ///
+    /// This is a cheap clone operation that runs under the caller's lock.
+    /// The returned payload is fully owned and safe to move to a background
+    /// thread for disk I/O.
+    fn build_persist_payload(&self) -> Result<Option<(PathBuf, PersistedSubAgentState)>> {
         let Some(path) = self.state_path.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         let path = checked_subagent_state_path(&self.workspace, path)?;
         let now_ms = epoch_millis_now();
@@ -1959,9 +1964,36 @@ impl SubAgentManager {
             agents,
             workers: self.sorted_worker_records(),
         };
-        write_json_atomic(&self.workspace, &path, &payload)
+        Ok(Some((path, payload)))
     }
 
+    /// Persist the current fleet state to disk.
+    ///
+    /// #freeze: JSON serialization runs cheaply under the caller's lock; the
+    /// expensive disk I/O (`write_json_atomic`) is spawned onto a background
+    /// thread so the caller's write lock is released before touching the
+    /// filesystem.
+    ///
+    /// Returns a [`std::thread::JoinHandle`] that resolves when the disk write
+    /// completes.  Callers may `.join()` for synchronous semantics or drop it
+    /// for fire-and-forget.
+    fn persist_state(&self) -> Result<std::thread::JoinHandle<()>> {
+        let Some((path, payload)) = self.build_persist_payload()? else {
+            // Nothing to persist — return a no-op handle.
+            return Ok(std::thread::spawn(|| {}));
+        };
+        let workspace = self.workspace.clone();
+        // Spawn disk I/O off the write-lock hot path.  `payload` is fully
+        // owned (cloned from `self.agents`) so it is `Send` and safe to move.
+        let handle = std::thread::spawn(move || {
+            if let Err(err) = write_json_atomic(&workspace, &path, &payload) {
+                tracing::warn!(target: "subagent", ?err, "failed to persist sub-agent state");
+            }
+        });
+        Ok(handle)
+    }
+
+    /// Fire-and-forget persist — logs errors, drops the join handle.
     fn persist_state_best_effort(&self) {
         if let Err(err) = self.persist_state() {
             // Must not be `eprintln!` — raw stderr inside the alt-screen
@@ -1969,6 +2001,8 @@ impl SubAgentManager {
             // regression (#1085). Routed through tracing so the
             // file-backed subscriber in `runtime_log` captures it.
             tracing::warn!(target: "subagent", ?err, "failed to persist sub-agent state");
+        } else {
+            // Join handle is dropped here — disk I/O proceeds in background.
         }
     }
 
@@ -2007,11 +2041,20 @@ impl SubAgentManager {
     /// #freeze: force a persist if a hot-path write was previously coalesced
     /// away. Call on graceful shutdown / session teardown so the most recent
     /// intermediate checkpoint is not lost.
+    ///
+    /// Unlike [`persist_state`], this performs disk I/O **synchronously** to
+    /// guarantee data is flushed before the process exits.
     pub fn flush_pending_persist(&mut self) {
         if self.persist_pending {
             self.last_persist_at = Some(Instant::now());
             self.persist_pending = false;
-            self.persist_state_best_effort();
+            // Synchronous disk I/O — safe because we are shutting down and no
+            // callers depend on releasing the write lock quickly.
+            if let Ok(Some((path, payload))) = self.build_persist_payload() {
+                if let Err(err) = write_json_atomic(&self.workspace, &path, &payload) {
+                    tracing::warn!(target: "subagent", ?err, "failed to flush pending sub-agent state");
+                }
+            }
         }
     }
 
