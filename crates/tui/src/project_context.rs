@@ -1056,6 +1056,13 @@ pub(crate) fn project_context_cache_candidate_paths(
     // when rules change (not just when AGENTS.md changes).
     for rules_dir in RULES_DIRS {
         let dir_path = workspace.join(rules_dir);
+        // Skip symlinked rules directories (same guard as load_rules_from_dir)
+        if fs::symlink_metadata(&dir_path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            continue;
+        }
         if let Ok(entries) = std::fs::read_dir(&dir_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -1299,6 +1306,21 @@ fn context_candidate_exists(path: &Path) -> bool {
 fn load_rules_from_dir(workspace: &Path, rules_dir_name: &str) -> Vec<(PathBuf, String)> {
     let rules_dir = workspace.join(rules_dir_name);
     let mut entries: Vec<(PathBuf, String)> = Vec::new();
+
+    // Refuse a symlinked rules directory: the real .md files behind it
+    // would pass per-file is_symlink checks and be read from outside the
+    // workspace subtree — same escape class as #417.
+    if fs::symlink_metadata(&rules_dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            target: "project_context",
+            dir = %rules_dir.display(),
+            "Refusing symlinked rules directory"
+        );
+        return entries;
+    }
 
     let dir_iter = match fs::read_dir(&rules_dir) {
         Ok(iter) => iter,
@@ -2755,6 +2777,34 @@ mod tests {
                     .unwrap()
                     .contains("outside content"),
             "symlinked rules must not be loaded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rules_rejects_symlinked_directory() {
+        let workspace = tempdir().expect("workspace tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        let outside_dir = outside.path().join("real_rules");
+        fs::create_dir_all(&outside_dir).expect("mkdir outside dir");
+        fs::write(outside_dir.join("secret.md"), "outside content").expect("write outside");
+        fs::create_dir_all(workspace.path().join(".codewhale")).expect("mkdir codewhale");
+
+        // Symlink the directory itself, not individual files
+        std::os::unix::fs::symlink(&outside_dir, workspace.path().join(".codewhale/rules"))
+            .expect("symlink rules dir");
+
+        let ctx = load_project_context(workspace.path());
+
+        // Symlinked rules directory must be refused at the directory level
+        assert!(
+            ctx.rules_block.is_none()
+                || !ctx
+                    .rules_block
+                    .as_ref()
+                    .unwrap()
+                    .contains("outside content"),
+            "symlinked rules directory must be refused"
         );
     }
 
