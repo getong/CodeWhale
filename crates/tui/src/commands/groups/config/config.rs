@@ -3183,7 +3183,7 @@ max_concurrent = 4
         assert_eq!(
             result.message.as_deref(),
             Some(
-                "stream_chunk_timeout_secs = 0 (default 300) (session only; affects subsequent turns in this session)"
+                "stream_chunk_timeout_secs = 0 (default 900) (session only; affects subsequent turns in this session)"
             )
         );
         assert!(matches!(

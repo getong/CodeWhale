@@ -3955,6 +3955,24 @@ fn turn_liveness_does_not_abort_running_tool_with_recent_heartbeat() {
 }
 
 #[test]
+fn turn_liveness_respects_stream_idle_budget_for_quiet_model_waits() {
+    let mut app = create_test_app();
+    let started_at = Instant::now();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.stream_chunk_timeout_secs = 900;
+    app.turn_started_at = Some(started_at);
+    app.turn_last_activity_at = Some(started_at);
+    let now = started_at + TURN_STALL_WATCHDOG_TIMEOUT + Duration::from_secs(31);
+
+    let recovered = reconcile_turn_liveness(&mut app, now, false);
+
+    assert!(!recovered);
+    assert!(app.is_loading);
+    assert!(app.status_toasts.is_empty());
+}
+
+#[test]
 fn turn_liveness_recovers_running_tool_without_heartbeat() {
     let mut app = create_test_app();
     let started_at = Instant::now();
@@ -3997,15 +4015,16 @@ fn turn_liveness_recovers_running_tool_without_heartbeat() {
 #[test]
 fn turn_liveness_recovers_stalled_in_progress_turn() {
     let mut app = create_test_app();
+    let now = Instant::now();
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
     app.runtime_turn_id = Some("stale-turn-id".to_string());
-    app.turn_started_at =
-        Some(Instant::now() - TURN_STALL_WATCHDOG_TIMEOUT - Duration::from_millis(1));
+    app.stream_chunk_timeout_secs = 300;
+    app.turn_started_at = Some(now - turn_stall_watchdog_timeout(&app) - Duration::from_millis(1));
     app.streaming_message_index = Some(0);
     app.user_scrolled_during_stream = true;
 
-    let recovered = reconcile_turn_liveness(&mut app, Instant::now(), false);
+    let recovered = reconcile_turn_liveness(&mut app, now, false);
 
     assert!(recovered);
     assert!(!app.is_loading);

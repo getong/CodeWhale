@@ -1205,7 +1205,7 @@ pub struct TuiConfig {
     /// Timeout for startup terminal mode/probe calls in milliseconds.
     /// Defaults to 500ms when omitted.
     pub terminal_probe_timeout_ms: Option<u64>,
-    /// Per-SSE-chunk idle timeout in seconds. Defaults to 300 seconds when
+    /// Per-SSE-chunk idle timeout in seconds. Defaults to 900 seconds when
     /// omitted. `0` maps to the default; values clamp to `1..=3600`.
     pub stream_chunk_timeout_secs: Option<u64>,
     /// Ordered list of footer items the user wants visible. `None` (the field
@@ -3909,7 +3909,7 @@ impl Config {
     ///
     /// Reads `[tui].stream_chunk_timeout_secs`, falling back to the legacy
     /// `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var when the config key is
-    /// omitted. `None` or `0` resolve to the default 300 seconds; explicit
+    /// omitted. `None` or `0` resolve to the default 900 seconds; explicit
     /// values are clamped to `1..=3600`.
     #[must_use]
     pub fn stream_chunk_timeout_secs(&self) -> u64 {

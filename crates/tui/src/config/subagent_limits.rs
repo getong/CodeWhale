@@ -33,7 +33,7 @@ pub const MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 /// Maximum accepted `[subagents] heartbeat_timeout_secs` (1 hour).
 pub const MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS: u64 = 3600;
 /// Default per-SSE-chunk idle timeout, in seconds.
-pub const DEFAULT_STREAM_CHUNK_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_STREAM_CHUNK_TIMEOUT_SECS: u64 = 900;
 /// Minimum accepted stream chunk timeout.
 pub const MIN_STREAM_CHUNK_TIMEOUT_SECS: u64 = 1;
 /// Maximum accepted stream chunk timeout.

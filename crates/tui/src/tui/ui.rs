@@ -166,11 +166,13 @@ const UI_ACTIVE_POLL_MS: u64 = 24;
 const SUBAGENT_HOOK_PREVIEW_LIMIT: usize = 2_048;
 const WEB_CONFIG_POLL_MS: u64 = 16;
 const DISPATCH_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
-/// Maximum wall-clock time a turn may stay in `"in_progress"` before the UI
+/// Minimum wall-clock time a turn may stay in `"in_progress"` before the UI
 /// assumes the engine stalled (e.g. sub-agent hang, lost completion event,
-/// engine panic).  Matched to [`DEFAULT_STREAM_IDLE_TIMEOUT`] so legitimate
-/// long-running tool chains are not interrupted prematurely.
+/// engine panic).  The effective watchdog also respects the configured stream
+/// idle timeout so legitimate long model-reasoning pauses are not interrupted
+/// prematurely.
 const TURN_STALL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300);
+const TURN_STALL_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 /// Running tools can legitimately exceed the silent-turn timeout, but a tool
 /// with no progress heartbeat or output beyond this ceiling is treated as hung.
 const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(900);
@@ -5792,7 +5794,7 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
             .turn_last_activity_at
             .or(app.turn_started_at)
             .is_some_and(|last_activity| {
-                now.saturating_duration_since(last_activity) > TURN_STALL_WATCHDOG_TIMEOUT
+                now.saturating_duration_since(last_activity) > turn_stall_watchdog_timeout(app)
             })
     {
         recover_stalled_runtime_turn(
@@ -5825,6 +5827,12 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
     }
 
     false
+}
+
+fn turn_stall_watchdog_timeout(app: &App) -> Duration {
+    let stream_budget = Duration::from_secs(app.stream_chunk_timeout_secs)
+        .saturating_add(TURN_STALL_WATCHDOG_GRACE);
+    TURN_STALL_WATCHDOG_TIMEOUT.max(stream_budget)
 }
 
 /// #2739: persist the current in-memory session state before a recovery or

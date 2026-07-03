@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented the Homebrew rollout strategy and added a distribution-channel
   check to the release checklist. Harvested from #3760 by @idling11.
 
+### Fixed
+
+- Raised the streamed model-response idle timeout and matched the TUI stall
+  watchdog to the configured stream budget so long reasoning pauses are not
+  recovered as stalled turns.
+
 ### Removed
 
 - Removed unused model-registry helpers. Harvested from #3872 by @cyq1017.
