@@ -679,17 +679,26 @@ fn format_configured_ask_rules(
         return lines.join("\n");
     }
 
-    lines.push("# | tool | command | path".to_string());
+    lines.push("# | action | tool | command | path".to_string());
     for (index, rule) in rules.iter().enumerate() {
         lines.push(format!(
-            "{} | {} | {} | {}",
+            "{} | {} | {} | {} | {}",
             index + 1,
+            format_rule_action(rule.action),
             format_rule_field(Some(&rule.tool)),
             format_rule_field(rule.command.as_deref()),
             format_rule_field(rule.path.as_deref())
         ));
     }
     lines.join("\n")
+}
+
+fn format_rule_action(action: codewhale_execpolicy::PermissionAction) -> &'static str {
+    match action {
+        codewhale_execpolicy::PermissionAction::Allow => "allow",
+        codewhale_execpolicy::PermissionAction::Ask => "ask",
+        codewhale_execpolicy::PermissionAction::Deny => "deny",
+    }
 }
 
 fn format_rule_field(value: Option<&str>) -> String {
@@ -2279,6 +2288,12 @@ command = "cargo test"
 [[rules]]
 tool = "edit_file"
 path = "src/a.rs"
+action = "allow"
+
+[[rules]]
+tool = "read_file"
+path = "secrets/api_key.txt"
+action = "deny"
 "#,
         )
         .unwrap();
@@ -2292,10 +2307,11 @@ path = "src/a.rs"
         assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
         assert!(msg.contains("File exists: yes"));
         assert!(msg.contains("File status: present"));
-        assert!(msg.contains("Rule count: 2"));
-        assert!(msg.contains("# | tool | command | path"));
-        assert!(msg.contains("1 | exec_shell | cargo test | (any)"));
-        assert!(msg.contains("2 | edit_file | (any) | src/a.rs"));
+        assert!(msg.contains("Rule count: 3"));
+        assert!(msg.contains("# | action | tool | command | path"));
+        assert!(msg.contains("1 | ask | exec_shell | cargo test | (any)"));
+        assert!(msg.contains("2 | allow | edit_file | (any) | src/a.rs"));
+        assert!(msg.contains("3 | deny | read_file | (any) | secrets/api_key.txt"));
     }
 
     #[test]
@@ -2330,9 +2346,15 @@ tool =
 
     #[test]
     fn config_command_ask_rules_output_format_is_stable() {
+        let mut allow_rule = codewhale_config::ToolAskRule::file_path("edit_file", r"src\a.rs");
+        allow_rule.action = codewhale_execpolicy::PermissionAction::Allow;
+        let mut deny_rule =
+            codewhale_config::ToolAskRule::file_path("read_file", "secrets/api_key.txt");
+        deny_rule.action = codewhale_execpolicy::PermissionAction::Deny;
         let rules = vec![
             codewhale_config::ToolAskRule::exec_shell("cargo test"),
-            codewhale_config::ToolAskRule::file_path("edit_file", r"src\a.rs"),
+            allow_rule,
+            deny_rule,
         ];
 
         let output = format_configured_ask_rules(
@@ -2348,10 +2370,11 @@ tool =
 Permissions path: permissions.toml\n\
 File exists: yes\n\
 File status: present\n\
-Rule count: 2\n\
-# | tool | command | path\n\
-1 | exec_shell | cargo test | (any)\n\
-2 | edit_file | (any) | src\\a.rs"
+Rule count: 3\n\
+# | action | tool | command | path\n\
+1 | ask | exec_shell | cargo test | (any)\n\
+2 | allow | edit_file | (any) | src\\a.rs\n\
+3 | deny | read_file | (any) | secrets/api_key.txt"
         );
     }
 
