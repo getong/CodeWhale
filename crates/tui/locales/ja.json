@@ -255,7 +255,7 @@
     "HomeGoalModeTip": "Goal 追跡 - /goal <目標> で持続的な目標を追跡",
     "OnboardLanguageTitle": "言語を選択",
     "OnboardLanguageBlurb": "UI 言語を選んでください。`/settings set locale <tag>` でいつでも変更できます。",
-    "OnboardLanguageFooter": "1〜7 で選択、または Enter で現在の設定を維持",
+    "OnboardLanguageFooter": "1〜8 で選択、または Enter で現在の設定を維持",
     "OnboardApiKeyTitle": "DeepSeek API キーを設定",
     "OnboardApiKeyStep1": "ステップ 1. https://platform.deepseek.com/api_keys を開いてキーを作成。",
     "OnboardApiKeyStep2": "ステップ 2. 下に貼り付けて Enter を押してください。",

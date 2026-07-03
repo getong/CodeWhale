@@ -12,6 +12,7 @@ use crate::models::SystemPrompt;
 use crate::project_context::{ProjectContext, load_project_context_with_parents};
 use crate::tui::app::AppMode;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct PromptSessionContext<'a> {
@@ -411,6 +412,8 @@ static LOCALE_CLOSER_VI_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceL
 static AUTHORITY_RECAP_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static STATIC_PROMPT_COMPOSER: std::sync::OnceLock<Box<StaticPromptComposer>> =
     std::sync::OnceLock::new();
+static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Context passed to an embedder-provided static prompt composer.
 ///
@@ -559,6 +562,19 @@ fn read_prompt_override_file(config_dir: &Path, relative: &str) -> Option<String
     Some(raw)
 }
 
+fn push_prompt_override_notice(message: String) {
+    if let Ok(mut notices) = PROMPT_OVERRIDE_NOTICES.lock() {
+        notices.push(message);
+    }
+}
+
+pub fn take_prompt_override_notices() -> Vec<String> {
+    PROMPT_OVERRIDE_NOTICES
+        .lock()
+        .map(|mut notices| std::mem::take(&mut *notices))
+        .unwrap_or_default()
+}
+
 /// Load user prompt overrides from `config_dir` and install them through the
 /// existing override hooks. Returns the names of the overrides that were
 /// applied (for logging/diagnostics).
@@ -572,15 +588,18 @@ pub fn load_config_dir_prompt_overrides(config_dir: &Path) -> Vec<&'static str> 
         if !base_prompt_override_opt_in() {
             // A file exists but the user hasn't opted in. Don't silently
             // replace the base prompt — surface the gate instead.
-            tracing::warn!(
-                target: "prompts",
-                "found a base-prompt override at {}/{} but {} is not set; \
-                 leaving the bundled Constitution in place. Set {}=1 to opt in.",
+            let warning = format!(
+                "Custom Constitution override found at {}/{} but {} is not set; using the bundled Constitution. Set {}=1 to opt in.",
                 config_dir.display(),
                 CONSTITUTION_OVERRIDE_FILE,
                 BASE_PROMPT_OVERRIDE_OPT_IN_ENV,
                 BASE_PROMPT_OVERRIDE_OPT_IN_ENV,
             );
+            tracing::warn!(
+                target: "prompts",
+                "{warning}",
+            );
+            push_prompt_override_notice(warning);
         } else if set_base_prompt_override(text).is_ok() {
             applied.push("constitution");
         }
@@ -1515,9 +1534,18 @@ mod tests {
         assert!(read_prompt_override_file(tmp.path(), CONSTITUTION_OVERRIDE_FILE).is_some());
         // ...but without the opt-in flag, nothing is applied.
         if std::env::var(BASE_PROMPT_OVERRIDE_OPT_IN_ENV).is_err() {
+            let _ = take_prompt_override_notices();
             assert!(
                 load_config_dir_prompt_overrides(tmp.path()).is_empty(),
                 "override must require the explicit opt-in flag, not just a file"
+            );
+            let notices = take_prompt_override_notices();
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice.contains(BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
+                        && notice.contains("using the bundled Constitution")),
+                "gated override should record a visible notice, got {notices:?}"
             );
         }
     }

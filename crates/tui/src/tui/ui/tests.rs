@@ -7341,6 +7341,73 @@ fn onboarding_after_api_key_save_routes_to_trust_when_needed() {
 }
 
 #[test]
+fn api_key_escape_returns_to_language_step() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::ApiKey;
+    app.api_key_input = "sk-test-value".to_string();
+    app.api_key_cursor = 4;
+    app.status_message = Some("editing".to_string());
+
+    back_from_api_key_onboarding(&mut app);
+
+    assert_eq!(app.onboarding, OnboardingState::Language);
+    assert!(app.api_key_input.is_empty());
+    assert_eq!(app.api_key_cursor, 0);
+    assert_eq!(app.status_message, None);
+}
+
+#[test]
+fn trust_directory_completion_advances_to_tips() {
+    let _guard = ConfigPathEnvGuard::new();
+    let tmpdir = TempDir::new().expect("workspace tempdir");
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    app.onboarding = OnboardingState::TrustDirectory;
+    app.onboarding_workspace_trust_gate = false;
+    app.trust_mode = false;
+
+    complete_trust_directory_onboarding(&mut app, &Config::default())
+        .expect("trust completion should succeed");
+
+    assert!(app.trust_mode);
+    assert_eq!(app.onboarding, OnboardingState::Tips);
+    assert!(app.runtime_services.hook_executor.is_some());
+}
+
+#[test]
+fn prompt_override_notice_surfaces_in_transcript_and_toast() {
+    let _lock = crate::test_support::lock_test_env();
+    let _env = crate::test_support::EnvVarGuard::remove(prompts::BASE_PROMPT_OVERRIDE_OPT_IN_ENV);
+    let tmpdir = TempDir::new().expect("config tempdir");
+    let prompts_dir = tmpdir.path().join("prompts");
+    std::fs::create_dir_all(&prompts_dir).expect("prompts dir");
+    std::fs::write(prompts_dir.join("constitution.md"), "custom law\n").expect("override file");
+    let _ = prompts::take_prompt_override_notices();
+    assert!(prompts::load_config_dir_prompt_overrides(tmpdir.path()).is_empty());
+
+    let mut app = create_test_app();
+    surface_prompt_override_notices(&mut app);
+
+    assert!(
+        app.history.iter().any(|cell| matches!(
+            cell,
+            HistoryCell::System { content }
+                if content.contains(prompts::BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
+                    && content.contains("bundled Constitution")
+        )),
+        "expected system warning in transcript, got {:?}",
+        app.history
+    );
+    let toast = app.status_toasts.back().expect("warning toast");
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    assert!(
+        toast
+            .text
+            .contains(prompts::BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
+    );
+}
+
+#[test]
 fn api_key_paste_shortcut_is_not_plain_text_input() {
     let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
     assert!(crate::tui::key_shortcuts::is_paste_shortcut(&ctrl_v));

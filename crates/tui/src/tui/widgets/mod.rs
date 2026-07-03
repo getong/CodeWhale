@@ -39,6 +39,7 @@ use crate::tui::approval::{
 };
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus};
 use crate::tui::scrolling::TranscriptLineMeta;
+use crate::tui::ui_text::{char_display_width, text_display_width};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -2335,21 +2336,6 @@ fn apply_selection_to_line(
     }
 
     result
-}
-
-fn text_display_width(text: &str) -> usize {
-    text.chars().map(char_display_width).sum()
-}
-
-fn char_display_width(ch: char) -> usize {
-    if ch == '\t' {
-        4
-    } else {
-        // `None` (control/unassigned) defaults to one column; `Some(0)` (combining
-        // marks, ZWJ, zero-width spaces) must stay 0 so width math matches what the
-        // terminal renders. Mirrors `ui_text::char_display_width`.
-        UnicodeWidthChar::width(ch).unwrap_or(1)
-    }
 }
 
 fn truncate_display_width(text: &str, max_width: usize) -> String {

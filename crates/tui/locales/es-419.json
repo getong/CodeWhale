@@ -258,7 +258,7 @@
     "HomeGoalModeTip": "Seguimiento de Goal - Usa /goal <objetivo> para seguir un objetivo persistente",
     "OnboardLanguageTitle": "Elige el idioma",
     "OnboardLanguageBlurb": "Elige el idioma de la interfaz. Puedes cambiarlo en cualquier momento con `/settings set locale <etiqueta>`.",
-    "OnboardLanguageFooter": "Presiona 1-7 para elegir, o Enter para mantener la configuración actual",
+    "OnboardLanguageFooter": "Presiona 1-8 para elegir, o Enter para mantener la configuración actual",
     "OnboardApiKeyTitle": "Conecta tu clave de API DeepSeek",
     "OnboardApiKeyStep1": "Paso 1.  Abre https://platform.deepseek.com/api_keys y crea una clave.",
     "OnboardApiKeyStep2": "Paso 2.  Pégala abajo y presiona Enter.",

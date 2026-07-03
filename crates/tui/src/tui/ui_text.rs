@@ -205,7 +205,7 @@ pub(super) fn slice_text(text: &str, start: usize, end: usize) -> String {
     out
 }
 
-fn char_display_width(ch: char) -> usize {
+pub(super) fn char_display_width(ch: char) -> usize {
     if ch == '\t' {
         4
     } else {
