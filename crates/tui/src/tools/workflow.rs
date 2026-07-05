@@ -59,6 +59,26 @@ type SharedWorkflowRuns = Arc<Mutex<HashMap<String, WorkflowRunRecord>>>;
 type SharedWorkflowControllers = Arc<Mutex<HashMap<String, Arc<SubAgentWorkflowDriver>>>>;
 
 #[derive(Debug, Clone, Serialize)]
+struct WorkflowRunSummary {
+    run_id: String,
+    status: WorkflowRunStatus,
+    started_at_ms: u64,
+    completed_at_ms: Option<u64>,
+    source_path: Option<PathBuf>,
+    workflow_id: Option<String>,
+    workflow_goal: Option<String>,
+    token_budget: Option<u64>,
+    child_count: usize,
+    progress_count: usize,
+    last_progress: Option<String>,
+    leaf_count: usize,
+    branch_count: usize,
+    control_count: usize,
+    execution_status: Option<IrWorkflowRunStatus>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct WorkflowRunRecord {
     run_id: String,
     status: WorkflowRunStatus,
@@ -96,6 +116,39 @@ impl WorkflowRunRecord {
             result: None,
             execution: None,
             error: None,
+        }
+    }
+
+    fn summary(&self) -> WorkflowRunSummary {
+        WorkflowRunSummary {
+            run_id: self.run_id.clone(),
+            status: self.status,
+            started_at_ms: self.started_at_ms,
+            completed_at_ms: self.completed_at_ms,
+            source_path: self.source_path.clone(),
+            workflow_id: self.workflow_id.clone(),
+            workflow_goal: self.workflow_goal.clone(),
+            token_budget: self.token_budget,
+            child_count: self.child_ids.len(),
+            progress_count: self.progress.len(),
+            last_progress: self.progress.last().cloned(),
+            leaf_count: self
+                .execution
+                .as_ref()
+                .map(|execution| execution.leaf_results.len())
+                .unwrap_or_default(),
+            branch_count: self
+                .execution
+                .as_ref()
+                .map(|execution| execution.branch_results.len())
+                .unwrap_or_default(),
+            control_count: self
+                .execution
+                .as_ref()
+                .map(|execution| execution.control_node_results.len())
+                .unwrap_or_default(),
+            execution_status: self.execution.as_ref().map(|execution| execution.status),
+            error: self.error.clone(),
         }
     }
 }
@@ -308,15 +361,18 @@ fn status_workflow(input: Value, runs: SharedWorkflowRuns) -> Result<ToolResult,
     if let Some(run_id) = optional_str(&input, "run_id") {
         return workflow_result_for(run_id, runs);
     }
-    let mut records = {
+    let mut summaries = {
         let runs_guard = lock_mutex(&runs)?;
-        runs_guard.values().cloned().collect::<Vec<_>>()
+        runs_guard
+            .values()
+            .map(WorkflowRunRecord::summary)
+            .collect::<Vec<_>>()
     };
-    records.sort_by_key(|record| record.started_at_ms);
+    summaries.sort_by_key(|record| record.started_at_ms);
     ToolResult::json(&json!({
         "action": "status",
-        "count": records.len(),
-        "runs": records,
+        "count": summaries.len(),
+        "runs": summaries,
     }))
     .map_err(|err| ToolError::execution_failed(err.to_string()))
 }
@@ -396,11 +452,16 @@ fn workflow_result_for(run_id: &str, runs: SharedWorkflowRuns) -> Result<ToolRes
     };
     let mut result =
         ToolResult::json(&record).map_err(|err| ToolError::execution_failed(err.to_string()))?;
+    let summary = record.summary();
     result.metadata = Some(json!({
-        "run_id": record.run_id,
-        "status": record.status,
-        "terminal": record.status != WorkflowRunStatus::Running,
-        "child_count": record.child_ids.len(),
+        "run_id": summary.run_id,
+        "status": summary.status,
+        "terminal": summary.status != WorkflowRunStatus::Running,
+        "child_count": summary.child_count,
+        "leaf_count": summary.leaf_count,
+        "branch_count": summary.branch_count,
+        "control_count": summary.control_count,
+        "execution_status": summary.execution_status,
     }));
     Ok(result)
 }
@@ -1677,6 +1738,67 @@ mod tests {
         let second_body = bodies.get(1).expect("second provider call").to_string();
         assert!(second_body.contains("--- first ---"), "{second_body}");
         assert!(second_body.contains("upstream-output"), "{second_body}");
+    }
+
+    #[tokio::test]
+    async fn workflow_status_lists_compact_typed_receipts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (client, _calls) = fake_chat_client("status-output").await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager,
+        );
+        let tool = WorkflowTool::new(runtime.manager.clone(), runtime);
+
+        let run = tool
+            .execute(
+                json!({
+                    "action": "run",
+                    "script": r#"export default workflow({
+                        "id": "status-fixture",
+                        "goal": "status summary",
+                        "nodes": [
+                            {
+                                "agent": {
+                                    "id": "inspect",
+                                    "prompt": "Inspect the code.",
+                                    "agent_type": "review"
+                                }
+                            }
+                        ]
+                    });"#
+                }),
+                &ctx,
+            )
+            .await
+            .expect("workflow run");
+        let run_payload: Value = serde_json::from_str(&run.content).expect("run json");
+
+        let status = tool
+            .execute(json!({"action": "status"}), &ctx)
+            .await
+            .expect("workflow status");
+        let status_payload: Value = serde_json::from_str(&status.content).expect("status json");
+        let summary = &status_payload["runs"][0];
+
+        assert_eq!(status_payload["count"], 1);
+        assert_eq!(summary["run_id"], run_payload["run_id"]);
+        assert_eq!(summary["workflow_id"], "status-fixture");
+        assert_eq!(summary["workflow_goal"], "status summary");
+        assert_eq!(summary["status"], "completed");
+        assert_eq!(summary["execution_status"], "succeeded");
+        assert_eq!(summary["child_count"], 1);
+        assert_eq!(summary["leaf_count"], 1);
+        assert_eq!(summary["branch_count"], 0);
+        assert_eq!(summary["control_count"], 0);
+        assert!(summary.get("result").is_none());
+        assert!(summary.get("execution").is_none());
     }
 
     #[tokio::test]
