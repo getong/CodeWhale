@@ -3214,6 +3214,53 @@ async fn provider_switch_model_override_updates_target_provider_model_slot() {
 }
 
 #[tokio::test]
+async fn provider_switch_skips_setup_receipt_when_route_persistence_fails() {
+    let _home = SettingsHomeGuard::new();
+    let tmp = TempDir::new().expect("config tempdir");
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::XiaomiMimo;
+    app.model = "mimo-v2.5-pro".to_string();
+    app.config_path = Some(tmp.path().to_path_buf());
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        provider: Some("xiaomi-mimo".to_string()),
+        api_key: Some("deepseek-key".to_string()),
+        default_text_model: Some("mimo-v2.5-pro".to_string()),
+        providers: Some(ProvidersConfig {
+            xiaomi_mimo: ProviderConfig {
+                api_key: Some("mimo-key".to_string()),
+                model: Some("mimo-v2.5-pro".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    switch_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApiProvider::Deepseek,
+        Some("deepseek-v4-flash".to_string()),
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("not fully persisted"))
+    );
+    assert!(
+        codewhale_config::SetupState::load()
+            .expect("load setup state")
+            .is_none(),
+        "failed route persistence must not create a ProviderModel setup receipt"
+    );
+}
+
+#[tokio::test]
 async fn provider_switch_without_model_uses_target_default_not_previous_provider_model() {
     let _home = SettingsHomeGuard::new();
     let mut app = create_test_app();
@@ -8774,6 +8821,55 @@ async fn model_picker_persists_model_and_reasoning_effort() {
     assert!(!provider_model_result.contains("test-key"));
 }
 
+#[tokio::test]
+async fn model_picker_skips_setup_receipt_when_settings_persistence_fails() {
+    let _lock = crate::test_support::lock_test_env();
+    let tmp = TempDir::new().expect("settings tempdir");
+    let bad_home = tmp.path().join("codewhale-home-file");
+    std::fs::write(&bad_home, "not a directory").expect("bad home file");
+    let _home = crate::test_support::EnvVarGuard::set("HOME", tmp.path().as_os_str());
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", tmp.path().as_os_str());
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", bad_home.as_os_str());
+    let _deepseek_config_path = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    let _codewhale_config_path = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+    let _codewhale_provider = crate::test_support::EnvVarGuard::remove("CODEWHALE_PROVIDER");
+    let _deepseek_provider = crate::test_support::EnvVarGuard::remove("DEEPSEEK_PROVIDER");
+
+    let mut app = create_test_app();
+    app.set_model_selection("auto".to_string());
+    app.reasoning_effort = ReasoningEffort::Auto;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        api_key: Some("test-key".to_string()),
+        ..Default::default()
+    };
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "deepseek-v4-pro".to_string(),
+        None,
+        ReasoningEffort::High,
+        "auto".to_string(),
+        ReasoningEffort::Auto,
+    )
+    .await;
+
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("not persisted"))
+    );
+    assert!(
+        codewhale_config::SetupState::load()
+            .expect("load setup state")
+            .is_none(),
+        "failed model persistence must not create a ProviderModel setup receipt"
+    );
+}
+
 #[test]
 fn apply_loaded_session_restores_artifact_registry() {
     let mut app = create_test_app();
@@ -10207,6 +10303,87 @@ async fn provider_switch_auth_error_restores_previous_provider_and_model() {
             .is_none_or(|status| !status.contains("Provider switch failed")),
         "status message is set by the async event loop after engine respawn"
     );
+}
+
+#[tokio::test]
+async fn provider_switch_rollback_corrects_setup_receipt_when_persistence_fails() {
+    use crate::error_taxonomy::ErrorEnvelope;
+
+    let _home = SettingsHomeGuard::new();
+    let bad_config_path = TempDir::new().expect("bad config path");
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = "deepseek-v4-pro".to_string();
+    app.model_ids_passthrough = false;
+    app.onboarding = OnboardingState::None;
+    app.onboarding_needs_api_key = false;
+    app.api_key_env_only = true;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some("deepseek-key".to_string()),
+        default_text_model: Some("deepseek-v4-pro".to_string()),
+        providers: Some(ProvidersConfig {
+            deepseek: ProviderConfig {
+                api_key: Some("deepseek-key".to_string()),
+                ..Default::default()
+            },
+            moonshot: ProviderConfig {
+                api_key: Some("kimi-key".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    switch_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApiProvider::Moonshot,
+        Some("kimi-k2.6".to_string()),
+    )
+    .await;
+    let target_state = codewhale_config::SetupState::load()
+        .expect("load target setup state")
+        .expect("target setup state");
+    let target_result = target_state
+        .steps
+        .get(&codewhale_config::SetupStep::ProviderModel)
+        .and_then(|entry| entry.result.as_deref())
+        .expect("target provider/model result");
+    assert!(target_result.contains("provider=moonshot"));
+    assert!(target_result.contains("model=kimi-k2.6"));
+
+    apply_engine_error_to_app(
+        &mut app,
+        ErrorEnvelope::fatal_auth("Authentication failed: invalid API key"),
+    );
+    app.config_path = Some(bad_config_path.path().to_path_buf());
+    let rollback_status = rollback_provider_after_auth_failure(&mut app, &mut config)
+        .expect("auth failure after provider switch should roll back");
+
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(app.model, "deepseek-v4-pro");
+    assert!(
+        rollback_status.contains("not fully persisted"),
+        "{rollback_status}"
+    );
+    let state = codewhale_config::SetupState::load()
+        .expect("load setup state")
+        .expect("setup state");
+    let provider_model_result = state
+        .steps
+        .get(&codewhale_config::SetupStep::ProviderModel)
+        .and_then(|entry| entry.result.as_deref())
+        .expect("provider/model result");
+    assert!(provider_model_result.contains("provider=deepseek"));
+    assert!(provider_model_result.contains("model=deepseek-v4-pro"));
+    assert!(!provider_model_result.contains("moonshot"));
+    assert!(!provider_model_result.contains("kimi-k2.6"));
+    assert!(!provider_model_result.contains("deepseek-key"));
+    assert!(!provider_model_result.contains("kimi-key"));
 }
 
 #[test]
