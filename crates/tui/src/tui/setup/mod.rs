@@ -40,10 +40,12 @@ use codewhale_config::{
 mod fleet_draft;
 mod model_draft;
 mod persistence;
+mod remote;
 
 pub(crate) use fleet_draft::{draft_fleet_profile_with_model, workspace_fingerprint};
 pub(crate) use model_draft::draft_constitution_with_model;
 use persistence::SetupPersistenceFacts;
+use remote::SetupRemoteFacts;
 
 /// Target lane for the once-per-version constitution checkpoint. The workspace
 /// package remains 0.8.66 until release approval, so this cannot read
@@ -475,41 +477,7 @@ impl SetupRuntimeFacts {
             "mcp_servers={}, skills={}, tools={}, plugins={}, mode=read_only_review",
             app.mcp_configured_count, skills_count, tools_count, plugins_count
         );
-        let remote_cloud_slugs = crate::remote_setup::registry::CLOUD_TARGETS
-            .iter()
-            .map(|cloud| cloud.slug)
-            .collect::<Vec<_>>();
-        let remote_bridge_slugs = crate::remote_setup::registry::BRIDGES
-            .iter()
-            .map(|bridge| bridge.slug)
-            .collect::<Vec<_>>();
-        let remote_provider_count = codewhale_config::ProviderKind::all().len();
-        let remote_clouds_result = format!(
-            "{} cloud targets: {}",
-            remote_cloud_slugs.len(),
-            remote_cloud_slugs.join(", ")
-        );
-        let remote_bridges_result = format!(
-            "{} chat bridges: {}",
-            remote_bridge_slugs.len(),
-            remote_bridge_slugs.join(", ")
-        );
-        let remote_providers_result = format!(
-            "{remote_provider_count} providers from the provider registry; active route {} / {}",
-            app.api_provider.as_str(),
-            app.model
-        );
-        let remote_mode_result = format!(
-            "generate-only bundle; --apply not implemented; default port {}, workers {}",
-            crate::remote_setup::bundle::DEFAULT_PORT,
-            crate::remote_setup::bundle::DEFAULT_WORKERS
-        );
-        let remote_result = format!(
-            "clouds={}, bridges={}, providers={}, mode=generate_only, apply=not_implemented",
-            remote_cloud_slugs.len(),
-            remote_bridge_slugs.len(),
-            remote_provider_count
-        );
+        let remote = SetupRemoteFacts::from_app(app);
         let constitution_autonomy = UserConstitution::load()
             .ok()
             .and_then(|load| {
@@ -557,11 +525,11 @@ impl SetupRuntimeFacts {
             tools_mcp_tools_result,
             tools_mcp_plugins_result,
             tools_mcp_result,
-            remote_clouds_result,
-            remote_bridges_result,
-            remote_providers_result,
-            remote_mode_result,
-            remote_result,
+            remote_clouds_result: remote.clouds_result,
+            remote_bridges_result: remote.bridges_result,
+            remote_providers_result: remote.providers_result,
+            remote_mode_result: remote.mode_result,
+            remote_result: remote.result,
             persistence,
             default_mode: app.mode.as_setting().to_string(),
             approval_policy_value: config
@@ -2290,16 +2258,11 @@ impl SetupWizardView {
     }
 
     fn commit_provider_model_review(&mut self) -> ViewAction {
-        let status = if self.facts.provider_ready {
-            StepStatus::Verified
-        } else {
-            StepStatus::NeedsAction
-        };
+        let status = provider_model_step_status(&self.facts);
         let mut state = self.state.clone();
         state.set_step(
             SetupStep::ProviderModel,
-            StepEntry::new(status, true, CONSTITUTION_CHECKPOINT_VERSION)
-                .with_result(self.facts.provider_result.clone()),
+            provider_model_step_entry_from_facts(&self.facts),
         );
         self.state = state.clone();
         self.move_next();
@@ -3660,135 +3623,13 @@ fn setup_report_result(state: &SetupState, facts: &SetupRuntimeFacts) -> String 
 }
 
 fn remote_runtime_on_ramp_text(locale: Locale, facts: &SetupRuntimeFacts) -> String {
-    let command = "codewhale remote-setup --generate-only --cloud lighthouse --bridge telegram --provider deepseek --out ./codewhale-deploy/lighthouse-telegram";
-    match locale {
-        Locale::Ja => format!(
-            "Remote Runtime On-Ramp\n\n\
-             /setup はリモートランタイムの事実だけを表示します。デプロイバンドルの生成、認証情報の書き込み、クラウド CLI の呼び出し、`remote-setup` の実行は行いません。\n\n\
-             現在の事実:\n\
-             - クラウド: {}\n\
-             - ブリッジ: {}\n\
-             - プロバイダー: {}\n\
-             - モード: {}\n\n\
-             デプロイバンドルを生成する場合は、通常の端末で明示的に実行してください:\n\n\
-             ```sh\n\
-             {command}\n\
-             ```\n\n\
-             生成された RUNBOOK には人間が確認するホスト手順が含まれます。`--apply` は未実装です。自動デプロイとして扱わないでください。",
-            facts.remote_clouds_result,
-            facts.remote_bridges_result,
-            facts.remote_providers_result,
-            facts.remote_mode_result
-        ),
-        Locale::ZhHans => format!(
-            "Remote Runtime On-Ramp\n\n\
-             /setup 只展示远程运行时事实，不会生成部署包、写入凭据、调用云 CLI 或运行 `remote-setup`。\n\n\
-             当前事实：\n\
-             - 云目标：{}\n\
-             - 聊天桥：{}\n\
-             - 服务商：{}\n\
-             - 模式：{}\n\n\
-             生成部署包时，请在普通终端显式运行：\n\n\
-             ```sh\n\
-             {command}\n\
-             ```\n\n\
-             生成的 RUNBOOK 会包含需要人工复核的主机步骤。`--apply` 仍未实现；不要把它当成自动部署。",
-            facts.remote_clouds_result,
-            facts.remote_bridges_result,
-            facts.remote_providers_result,
-            facts.remote_mode_result
-        ),
-        Locale::ZhHant => format!(
-            "Remote Runtime On-Ramp\n\n\
-             /setup 只顯示遠端執行時事實，不會生成部署包、寫入憑證、呼叫雲端 CLI 或執行 `remote-setup`。\n\n\
-             目前事實：\n\
-             - 雲端：{}\n\
-             - 橋接：{}\n\
-             - 供應商：{}\n\
-             - 模式：{}\n\n\
-             生成部署包時，請在一般終端明確執行：\n\n\
-             ```sh\n\
-             {command}\n\
-             ```\n\n\
-             生成的 RUNBOOK 會包含需要人工複核的主機步驟。`--apply` 仍未實作；不要把它當成自動部署。",
-            facts.remote_clouds_result,
-            facts.remote_bridges_result,
-            facts.remote_providers_result,
-            facts.remote_mode_result
-        ),
-        Locale::PtBr => format!(
-            "Remote Runtime On-Ramp\n\n\
-             /setup apenas mostra fatos do runtime remoto. Ele não gera bundles, grava credenciais, chama CLIs de cloud nem executa `remote-setup`.\n\n\
-             Fatos atuais:\n\
-             - Clouds: {}\n\
-             - Pontes: {}\n\
-             - Provedores: {}\n\
-             - Modo: {}\n\n\
-             Para gerar um bundle de deploy, execute explicitamente em um terminal normal:\n\n\
-             ```sh\n\
-             {command}\n\
-             ```\n\n\
-             O RUNBOOK gerado contém os passos de host para revisão humana. `--apply` continua não implementado; não trate isso como auto-deploy.",
-            facts.remote_clouds_result,
-            facts.remote_bridges_result,
-            facts.remote_providers_result,
-            facts.remote_mode_result
-        ),
-        Locale::Es419 => format!(
-            "Remote Runtime On-Ramp\n\n\
-             /setup solo muestra datos del runtime remoto. No genera bundles, no escribe credenciales, no llama CLIs de cloud ni ejecuta `remote-setup`.\n\n\
-             Datos actuales:\n\
-             - Clouds: {}\n\
-             - Puentes: {}\n\
-             - Proveedores: {}\n\
-             - Modo: {}\n\n\
-             Para generar un bundle de deploy, ejecútalo explícitamente en una terminal normal:\n\n\
-             ```sh\n\
-             {command}\n\
-             ```\n\n\
-             El RUNBOOK generado contiene pasos de host para revisión humana. `--apply` sigue sin implementarse; no lo trates como auto-deploy.",
-            facts.remote_clouds_result,
-            facts.remote_bridges_result,
-            facts.remote_providers_result,
-            facts.remote_mode_result
-        ),
-        Locale::Vi => format!(
-            "Remote Runtime On-Ramp\n\n\
-             /setup chỉ hiển thị thông tin runtime từ xa. Nó không tạo bundle, ghi thông tin xác thực, gọi CLI cloud hay chạy `remote-setup`.\n\n\
-             Thông tin hiện tại:\n\
-             - Cloud: {}\n\
-             - Cầu nối: {}\n\
-             - Nhà cung cấp: {}\n\
-             - Chế độ: {}\n\n\
-             Để tạo bundle deploy, hãy chạy rõ ràng trong terminal thông thường:\n\n\
-             ```sh\n\
-             {command}\n\
-             ```\n\n\
-             RUNBOOK được tạo chứa các bước host để con người xem xét. `--apply` vẫn chưa được triển khai; đừng coi đây là auto-deploy.",
-            facts.remote_clouds_result,
-            facts.remote_bridges_result,
-            facts.remote_providers_result,
-            facts.remote_mode_result
-        ),
-        Locale::En => format!(
-            "Remote Runtime On-Ramp\n\n\
-             /setup only shows remote-runtime facts. It does not generate bundles, write credentials, call cloud CLIs, or run `remote-setup`.\n\n\
-             Current facts:\n\
-             - Clouds: {}\n\
-             - Bridges: {}\n\
-             - Providers: {}\n\
-             - Mode: {}\n\n\
-             To generate a deploy bundle, run this explicitly in a normal terminal:\n\n\
-             ```sh\n\
-             {command}\n\
-             ```\n\n\
-             The generated RUNBOOK contains the host steps for human review. `--apply` remains unimplemented; do not treat it as auto-deploy.",
-            facts.remote_clouds_result,
-            facts.remote_bridges_result,
-            facts.remote_providers_result,
-            facts.remote_mode_result
-        ),
-    }
+    remote::on_ramp_text(
+        locale,
+        &facts.remote_clouds_result,
+        &facts.remote_bridges_result,
+        &facts.remote_providers_result,
+        &facts.remote_mode_result,
+    )
 }
 
 #[cfg(test)]
@@ -4334,6 +4175,37 @@ pub fn load_setup_state_for_app(app: &App, config: &Config) -> SetupState {
         return state;
     }
     SetupState::derive_inherited(&inherited_facts_for_app(app, config))
+}
+
+pub(crate) fn record_provider_model_setup_state_for_app(
+    app: &App,
+    config: &Config,
+) -> anyhow::Result<SetupState> {
+    let facts = SetupRuntimeFacts::from_app_config(app, config);
+    let mut state = load_setup_state_for_app(app, config);
+    state.set_step(
+        SetupStep::ProviderModel,
+        provider_model_step_entry_from_facts(&facts),
+    );
+    state.save()?;
+    Ok(state)
+}
+
+fn provider_model_step_status(facts: &SetupRuntimeFacts) -> StepStatus {
+    if facts.provider_ready {
+        StepStatus::Verified
+    } else {
+        StepStatus::NeedsAction
+    }
+}
+
+fn provider_model_step_entry_from_facts(facts: &SetupRuntimeFacts) -> StepEntry {
+    StepEntry::new(
+        provider_model_step_status(facts),
+        true,
+        CONSTITUTION_CHECKPOINT_VERSION,
+    )
+    .with_result(facts.provider_result.clone())
 }
 
 #[must_use]

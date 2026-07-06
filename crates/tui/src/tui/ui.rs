@@ -6170,6 +6170,7 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
             settings.set("default_model", &app.model_selection_for_persistence())?;
         }
         settings.save()?;
+        crate::tui::setup::record_provider_model_setup_state_for_app(app, config)?;
         Ok(())
     })()
     .err()
@@ -7323,6 +7324,9 @@ async fn apply_model_picker_choice(
         summary.push_str(&warning);
     }
     app.status_message = Some(summary);
+    if model_changed {
+        record_provider_model_setup_progress(app, config);
+    }
 }
 
 async fn apply_picker_effort_choice(
@@ -7555,6 +7559,7 @@ async fn switch_provider(
         status_message.push_str(" (not fully persisted)");
     }
     app.status_message = Some(status_message);
+    record_provider_model_setup_progress(app, config);
 }
 
 fn provider_persistence_key(config: &Config, provider: ApiProvider) -> String {
@@ -9666,6 +9671,19 @@ fn apply_hotbar_setup_saved(
     app.needs_redraw = true;
 }
 
+fn record_provider_model_setup_progress(app: &mut App, config: &Config) {
+    if let Err(err) = crate::tui::setup::record_provider_model_setup_state_for_app(app, config) {
+        let note = format!("Setup provider/model state was not saved: {err}");
+        if let Some(status) = app.status_message.as_mut() {
+            status.push_str(" · ");
+            status.push_str(&note);
+        } else {
+            app.status_message = Some(note.clone());
+        }
+        app.add_message(HistoryCell::System { content: note });
+    }
+}
+
 fn use_bundled_constitution(app: &mut App, config: &Config) {
     let mut state = crate::tui::setup::load_setup_state_for_app(app, config);
     state.complete_constitution_checkpoint(
@@ -10189,7 +10207,7 @@ async fn handle_view_events(
                     app.view_stack.push(
                         crate::tui::provider_picker::ProviderPickerView::new_for_setup(
                             app.api_provider,
-                            None,
+                            Some(app.api_provider),
                             config,
                             runtime_status,
                         ),
@@ -10200,8 +10218,7 @@ async fn handle_view_events(
             }
             ViewEvent::SetupOpenModelRequested => {
                 if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
-                    app.view_stack
-                        .push(crate::tui::model_picker::ModelPickerView::new(app, config));
+                    open_model_picker_for_provider(app, config, app.api_provider);
                     app.status_message =
                         Some("Model route picker opened from /setup readiness.".to_string());
                 }

@@ -3194,6 +3194,23 @@ async fn provider_switch_model_override_updates_target_provider_model_slot() {
             .and_then(|providers| providers.xiaomi_mimo.model.as_deref()),
         Some("mimo-v2.5-pro")
     );
+
+    let state = codewhale_config::SetupState::load()
+        .expect("load setup state")
+        .expect("setup state");
+    assert_eq!(
+        state.status(codewhale_config::SetupStep::ProviderModel),
+        codewhale_config::StepStatus::Verified
+    );
+    let provider_model_result = state
+        .steps
+        .get(&codewhale_config::SetupStep::ProviderModel)
+        .and_then(|entry| entry.result.as_deref())
+        .expect("provider/model result");
+    assert!(provider_model_result.contains("provider=deepseek"));
+    assert!(provider_model_result.contains("model=deepseek-v4-flash"));
+    assert!(provider_model_result.contains("auth=present/local"));
+    assert!(!provider_model_result.contains("deepseek-key"));
 }
 
 #[tokio::test]
@@ -8703,12 +8720,15 @@ fn app_new_restores_saved_model_and_reasoning_effort() {
 
 #[tokio::test]
 async fn model_picker_persists_model_and_reasoning_effort() {
-    let _guard = ConfigPathEnvGuard::new();
+    let _guard = SettingsHomeGuard::new();
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());
     app.reasoning_effort = ReasoningEffort::Auto;
     let mut engine = mock_engine_handle();
-    let mut config = Config::default();
+    let mut config = Config {
+        api_key: Some("test-key".to_string()),
+        ..Default::default()
+    };
 
     apply_model_picker_choice(
         &mut app,
@@ -8735,6 +8755,23 @@ async fn model_picker_persists_model_and_reasoning_effort() {
     assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
     assert!(!app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+
+    let state = codewhale_config::SetupState::load()
+        .expect("load setup state")
+        .expect("setup state");
+    assert_eq!(
+        state.status(codewhale_config::SetupStep::ProviderModel),
+        codewhale_config::StepStatus::Verified
+    );
+    let provider_model_result = state
+        .steps
+        .get(&codewhale_config::SetupStep::ProviderModel)
+        .and_then(|entry| entry.result.as_deref())
+        .expect("provider/model result");
+    assert!(provider_model_result.contains("provider=deepseek"));
+    assert!(provider_model_result.contains("model=deepseek-v4-pro"));
+    assert!(provider_model_result.contains("auth=present/local"));
+    assert!(!provider_model_result.contains("test-key"));
 }
 
 #[test]
@@ -10143,6 +10180,25 @@ async fn provider_switch_auth_error_restores_previous_provider_and_model() {
         Some("deepseek-v4-pro")
     );
     assert_eq!(settings.default_model.as_deref(), Some("deepseek-v4-pro"));
+    let state = codewhale_config::SetupState::load()
+        .expect("load setup state")
+        .expect("setup state");
+    assert_eq!(
+        state.status(codewhale_config::SetupStep::ProviderModel),
+        codewhale_config::StepStatus::Verified
+    );
+    let provider_model_result = state
+        .steps
+        .get(&codewhale_config::SetupStep::ProviderModel)
+        .and_then(|entry| entry.result.as_deref())
+        .expect("provider/model result");
+    assert!(provider_model_result.contains("provider=deepseek"));
+    assert!(provider_model_result.contains("model=deepseek-v4-pro"));
+    assert!(provider_model_result.contains("auth=present/local"));
+    assert!(!provider_model_result.contains("moonshot"));
+    assert!(!provider_model_result.contains("kimi-k2.6"));
+    assert!(!provider_model_result.contains("deepseek-key"));
+    assert!(!provider_model_result.contains("kimi-key"));
     assert!(app.pending_provider_switch.is_none());
     assert!(rollback_status.contains("Provider switch failed"));
     assert!(
