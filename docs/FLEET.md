@@ -63,7 +63,7 @@ drafting behind a ratify gate:
   nothing is saved until you press **`g`** to ratify (or press `m` again to
   redraft). Ratifying writes the profile to `.codewhale/agents/<role>`.
 
-## Naming: Modes, Workflow, Fleet, and Swarm
+## Naming: Modes, Workflow, and Fleet
 
 These names describe different layers, not competing systems. Agent, Plan, and
 YOLO stay the permission/work modes. Workflow is an orchestration overlay that
@@ -77,10 +77,10 @@ can run on top of those modes when the task needs a continuous workflow.
 - **Fleet** is the durable sub-agent configuration and execution substrate:
   slots, profiles, per-slot models, tool posture, local/SSH hosts, trust
   policy, leases, heartbeats, logs, receipts, and status APIs.
-- **Swarm** is the high-fanout behavior inside Workflow. It is gated in
-  v0.8.61: `/swarm` must not revive prompt-only sub-agent fanout. It should
-  compile into a Workflow-backed fleet run once the durable worker and goal
-  re-dispatch substrate is available.
+- **High fan-out** is a behavior of a Workflow run, not a separate system:
+  when a phase needs many workers at once, Workflow dispatches them as a
+  Fleet-backed run (durable workers, receipts, goal re-dispatch) rather than
+  reviving prompt-only sub-agent fanout.
 
 UI guidance: keep the main transcript calm. A Workflow run should appear as a
 compact progress card plus Work/Agents sidebar rows with phase names, worker

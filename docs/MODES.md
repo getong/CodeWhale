@@ -12,9 +12,9 @@ a concrete model and thinking level; they are not TUI modes and are not part of
 the `Tab` cycle.
 
 Workflow is also separate from the `Tab` mode cycle. It is the visible
-continuous-work layer for repeatable workflows and fleet workers. Swarm-style
-high-fanout remains gated in v0.8.61 until it routes through durable
-Fleet-backed workers instead of prompt-only sub-agent fanout. The active mode
+continuous-work layer for repeatable workflows and fleet workers. High fan-out
+routes through durable Fleet-backed workers instead of prompt-only sub-agent
+fanout. The active mode
 still controls permissions; Workflow controls whether a large task is planned
 into a resumable workflow with its own progress view.
 

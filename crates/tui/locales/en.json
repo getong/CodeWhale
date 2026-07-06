@@ -145,7 +145,7 @@
     "CmdStatusDescription": "Show runtime session status",
     "CmdStatuslineDescription": "Configure which items appear in the footer",
     "CmdFleetDescription": "Open Fleet setup or worker status",
-    "CmdWorkflowDescription": "Orchestrate the current work as a workflow: /workflow [objective|status]",
+    "CmdWorkflowDescription": "Orchestrate the current work as a workflow: /workflow [objective|status|cancel <run_id>]",
     "CmdHotbarDescription": "Open Hotbar setup",
     "CmdSetupDescription": "Open constitution-first setup",
     "CmdSubagentsDescription": "Compatibility shortcut for /fleet status",

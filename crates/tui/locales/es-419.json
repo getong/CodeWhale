@@ -137,7 +137,7 @@
     "CmdStatusDescription": "Mostrar el estado de la sesión en ejecución",
     "CmdStatuslineDescription": "Configurar qué elementos aparecen en el pie de página",
     "CmdFleetDescription": "Abrir configuración Fleet o estado de workers",
-    "CmdWorkflowDescription": "Orquestar el trabajo actual como workflow: /workflow [objetivo|status]",
+    "CmdWorkflowDescription": "Orquestar el trabajo actual como workflow: /workflow [objetivo|status|cancel <run_id>]",
     "CmdHotbarDescription": "Abrir configuración de Hotbar",
     "CmdSubagentsDescription": "Atajo compatible para /fleet status",
     "CmdSystemDescription": "Mostrar el prompt de sistema actual",
