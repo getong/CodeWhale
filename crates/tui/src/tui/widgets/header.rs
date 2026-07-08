@@ -178,18 +178,16 @@ impl<'a> HeaderWidget<'a> {
 
     fn mode_color(mode: AppMode) -> Color {
         match mode {
-            AppMode::Agent | AppMode::Auto | AppMode::Multitask => palette::MODE_AGENT,
-            AppMode::Yolo | AppMode::Operate => palette::MODE_YOLO,
+            AppMode::Agent | AppMode::Auto | AppMode::Yolo => palette::MODE_AGENT,
             AppMode::Plan => palette::MODE_PLAN,
+            AppMode::Operate => palette::MODE_OPERATE,
         }
     }
 
     fn mode_name(mode: AppMode) -> &'static str {
         match mode {
-            AppMode::Agent | AppMode::Auto => "Act",
-            AppMode::Yolo => "Yolo",
+            AppMode::Agent | AppMode::Auto | AppMode::Yolo => "Act",
             AppMode::Plan => "Plan",
-            AppMode::Multitask => "Multitask",
             AppMode::Operate => "Operate",
         }
     }

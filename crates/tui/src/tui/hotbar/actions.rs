@@ -582,25 +582,11 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
             AppHotbarKind::Mode(AppMode::Agent),
         ));
         registry.register(AppHotbarAction::new(
-            "mode.multitask",
-            "multi",
-            "Multitask mode",
-            "Switch into Multitask delegation mode.",
-            AppHotbarKind::Mode(AppMode::Multitask),
-        ));
-        registry.register(AppHotbarAction::new(
             "mode.operate",
             "operate",
             "Operate mode",
-            "Switch into Operate fleet/workflow conductor mode.",
+            "Coordinate workflows, spawn workers, wait, and dispatch more work.",
             AppHotbarKind::Mode(AppMode::Operate),
-        ));
-        registry.register(AppHotbarAction::new(
-            "mode.yolo",
-            "yolo",
-            "YOLO (deprecated)",
-            "Legacy shim: Act mode with Full Access permissions.",
-            AppHotbarKind::Mode(AppMode::Yolo),
         ));
         registry.register(AppHotbarAction::new(
             "reasoning.cycle",
@@ -922,7 +908,7 @@ impl AppHotbarAction {
             AppHotbarKind::Mode(AppMode::Plan) => MessageId::HotbarActionModePlanName,
             AppHotbarKind::Mode(AppMode::Agent) => MessageId::HotbarActionModeAgentName,
             AppHotbarKind::Mode(AppMode::Yolo) => MessageId::HotbarActionModeYoloName,
-            AppHotbarKind::Mode(AppMode::Auto | AppMode::Multitask | AppMode::Operate) => {
+            AppHotbarKind::Mode(AppMode::Auto | AppMode::Operate) => {
                 return None;
             }
             AppHotbarKind::ReasoningCycle => MessageId::HotbarActionReasoningCycleName,
@@ -940,7 +926,7 @@ impl AppHotbarAction {
             AppHotbarKind::Mode(AppMode::Plan) => MessageId::HotbarActionModePlanDescription,
             AppHotbarKind::Mode(AppMode::Agent) => MessageId::HotbarActionModeAgentDescription,
             AppHotbarKind::Mode(AppMode::Yolo) => MessageId::HotbarActionModeYoloDescription,
-            AppHotbarKind::Mode(AppMode::Auto | AppMode::Multitask | AppMode::Operate) => {
+            AppHotbarKind::Mode(AppMode::Auto | AppMode::Operate) => {
                 return None;
             }
             AppHotbarKind::ReasoningCycle => MessageId::HotbarActionReasoningCycleDescription,
@@ -2020,10 +2006,8 @@ mod tests {
             vec![
                 "filetree.toggle",
                 "mode.agent",
-                "mode.multitask",
                 "mode.operate",
                 "mode.plan",
-                "mode.yolo",
                 "palette.open",
                 "reasoning.cycle",
                 "session.compact",
