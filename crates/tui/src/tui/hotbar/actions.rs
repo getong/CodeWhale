@@ -1978,7 +1978,7 @@ mod tests {
                 (2, Some("compact")),
                 (3, Some("plan")),
                 (4, Some("agent")),
-                (5, Some("yolo")),
+                (5, Some("operate")),
                 (6, Some("palette")),
                 (7, Some("side")),
                 (8, Some("trust")),
@@ -2314,11 +2314,12 @@ mod tests {
         let registry = HotbarActionRegistry::with_builtins();
         let plan = registry.get("mode.plan").expect("plan action");
         let agent = registry.get("mode.agent").expect("agent action");
-        let yolo = registry.get("mode.yolo").expect("yolo action");
+        let operate = registry.get("mode.operate").expect("operate action");
         let mut app = test_app();
 
         assert!(agent.is_active(&app));
         assert!(!plan.is_active(&app));
+        assert!(registry.get("mode.yolo").is_none());
 
         assert_eq!(
             plan.dispatch(&mut app).expect("dispatch plan"),
@@ -2329,16 +2330,12 @@ mod tests {
         assert!(!agent.is_active(&app));
 
         assert_eq!(
-            yolo.dispatch(&mut app).expect("dispatch yolo"),
-            HotbarDispatch::AppAction(AppAction::ModeChanged(AppMode::Yolo))
+            operate.dispatch(&mut app).expect("dispatch operate"),
+            HotbarDispatch::AppAction(AppAction::ModeChanged(AppMode::Operate))
         );
-        assert!(app.allow_shell);
-        assert!(app.trust_mode);
-        // YOLO is a legacy compatibility alias: entering it resolves to Agent
-        // mode with the bypass mirrors set, so the Agent action lights up.
-        assert_eq!(app.mode, AppMode::Agent);
-        assert!(app.yolo);
-        assert!(agent.is_active(&app));
+        assert_eq!(app.mode, AppMode::Operate);
+        assert!(operate.is_active(&app));
+        assert!(!agent.is_active(&app));
     }
 
     #[test]

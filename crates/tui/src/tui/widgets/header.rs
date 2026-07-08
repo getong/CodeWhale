@@ -660,6 +660,7 @@ mod tests {
     fn narrow_header_drops_version_chip_before_dropping_mode() {
         // Very tight width budget — the version is among the first
         // chips to disappear; the mode label must still render.
+        // YOLO is invisible Act+Bypass shorthand, so the chip reads "Act".
         let rendered = render_header(
             HeaderData::new(
                 AppMode::Yolo,
@@ -677,7 +678,7 @@ mod tests {
             "version chip should drop under width pressure: {rendered:?}",
         );
         assert!(
-            rendered.contains("Yolo") || rendered.contains('Y'),
+            rendered.contains("Act") || rendered.contains('A'),
             "mode label must survive: {rendered:?}",
         );
     }
@@ -730,9 +731,11 @@ mod tests {
             8,
         );
 
-        assert!(rendered.trim_start().starts_with('Y'));
+        // YOLO renders as Act; under extreme width pressure only the first
+        // glyph of the mode chip remains.
+        assert!(rendered.trim_start().starts_with('A'));
         assert!(!rendered.contains("Plan"));
-        assert!(!rendered.contains("Agent"));
+        assert!(!rendered.contains("Operate"));
     }
 
     #[test]

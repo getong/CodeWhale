@@ -2519,7 +2519,8 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         // user settings on the host machine.
         let _ = mode(&mut app, Some("agent"));
         let result = mode(&mut app, Some("yolo"));
-        assert!(result.message.unwrap().contains("Switched to YOLO mode"));
+        // YOLO is invisible Act+Bypass shorthand — user-facing copy says Act.
+        assert!(result.message.unwrap().contains("Switched to Act mode"));
         assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Yolo)));
         assert!(app.allow_shell);
         assert!(app.trust_mode);
