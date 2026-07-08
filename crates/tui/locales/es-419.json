@@ -320,7 +320,7 @@
     "OnboardApiKeyStep1": "Paso 1.  Abre la página de credenciales de tu proveedor y crea una clave para",
     "OnboardApiKeyLocalHint": "Los runtimes locales normalmente no requieren pegar una clave — inicia el servidor y presiona Enter.",
     "OnboardApiKeyStep2": "Paso 2.  Pégala abajo y presiona Enter.",
-    "OnboardApiKeySavedHint": "Guardada en ~/.codewhale/config.toml para funcionar en cualquier carpeta.",
+    "OnboardApiKeySavedHint": "Guardada en {path} para funcionar en cualquier carpeta.",
     "OnboardApiKeyFormatHint": "Pega la clave completa tal como fue emitida (sin espacios ni saltos de línea).",
     "OnboardApiKeyPlaceholder": "(pega la clave acá)",
     "OnboardApiKeyLabel": "Clave: ",

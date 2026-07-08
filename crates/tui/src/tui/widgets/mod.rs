@@ -3035,13 +3035,21 @@ fn push_command_entry(
         } else {
             None
         };
-        let desc = if info.aliases.is_empty() {
+        // Omit aliases already shown in the label (`/clear or /qingping`) so
+        // the description does not repeat them (#3990).
+        let remaining_aliases: Vec<&str> = info
+            .aliases
+            .iter()
+            .copied()
+            .filter(|alias| hint.as_deref() != Some(*alias))
+            .collect();
+        let desc = if remaining_aliases.is_empty() {
             info.description_for(locale).to_string()
         } else {
             format!(
                 "{}  (aliases: {})",
                 info.description_for(locale),
-                info.aliases
+                remaining_aliases
                     .iter()
                     .map(|a| format!("/{a}"))
                     .collect::<Vec<_>>()
@@ -3791,6 +3799,33 @@ mod tests {
         assert!(
             exit_pos < clear_pos,
             "expected /exit to rank above /clear for prefix /q, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn slash_completion_does_not_repeat_alias_already_in_label() {
+        // Typing `/p` matches `/clear` via alias `qingping`, so the label
+        // shows `/clear or /qingping`. The description must not also append
+        // `(aliases: /qingping)` (#3990).
+        let hints = slash_completion_hints("/p", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        let clear = hints
+            .iter()
+            .find(|h| h.name == "/clear")
+            .expect("/clear should appear for /p via qingping");
+        assert_eq!(
+            clear.alias_hint.as_deref(),
+            Some("qingping"),
+            "label should surface the matching alias"
+        );
+        assert!(
+            !clear.description.contains("(aliases:"),
+            "description should omit alias list when the only alias is already in the label: {}",
+            clear.description
+        );
+        assert!(
+            !clear.description.contains("/qingping"),
+            "description must not repeat /qingping: {}",
+            clear.description
         );
     }
 

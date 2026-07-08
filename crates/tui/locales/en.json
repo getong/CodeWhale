@@ -322,7 +322,7 @@
     "OnboardApiKeyStep1": "Step 1.  Open your provider credential page and create a key for",
     "OnboardApiKeyLocalHint": "Local runtimes usually need no pasted key — start the server, then press Enter.",
     "OnboardApiKeyStep2": "Step 2.  Paste it below and press Enter.",
-    "OnboardApiKeySavedHint": "Saved to ~/.codewhale/config.toml so it works from any folder.",
+    "OnboardApiKeySavedHint": "Saved to {path} so it works from any folder.",
     "OnboardApiKeyFormatHint": "Paste the full key exactly as issued (no spaces or newlines).",
     "OnboardApiKeyPlaceholder": "(paste key here)",
     "OnboardApiKeyLabel": "Key: ",

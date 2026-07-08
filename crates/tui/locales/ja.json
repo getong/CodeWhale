@@ -320,7 +320,7 @@
     "OnboardApiKeyStep1": "ステップ 1.  プロバイダーの認証情報ページを開き、次のキーを作成:",
     "OnboardApiKeyLocalHint": "ローカルランタイムは通常キーの貼り付け不要 — サーバーを起動して Enter。",
     "OnboardApiKeyStep2": "ステップ 2. 下に貼り付けて Enter を押してください。",
-    "OnboardApiKeySavedHint": "~/.codewhale/config.toml に保存されるので、どのフォルダからでも有効になります。",
+    "OnboardApiKeySavedHint": "{path} に保存されるので、どのフォルダからでも有効になります。",
     "OnboardApiKeyFormatHint": "発行されたキーをそのまま貼り付けてください（空白や改行を含めない）。",
     "OnboardApiKeyPlaceholder": "（ここにキーを貼り付け）",
     "OnboardApiKeyLabel": "キー: ",

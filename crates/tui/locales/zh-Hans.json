@@ -320,7 +320,7 @@
     "OnboardApiKeyStep1": "步骤 1.  打开你的提供商凭据页面并为",
     "OnboardApiKeyLocalHint": "本地运行时通常无需粘贴密钥——启动服务器后按 Enter。",
     "OnboardApiKeyStep2": "步骤 2.  把密钥粘贴到下方并按 Enter。",
-    "OnboardApiKeySavedHint": "保存到 ~/.codewhale/config.toml，因此在任何目录下都生效。",
+    "OnboardApiKeySavedHint": "保存到 {path}，因此在任何目录下都生效。",
     "OnboardApiKeyFormatHint": "请完整粘贴密钥（不要含空格或换行）。",
     "OnboardApiKeyPlaceholder": "（在此粘贴密钥）",
     "OnboardApiKeyLabel": "密钥: ",
