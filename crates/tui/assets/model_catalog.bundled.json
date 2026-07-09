@@ -33,6 +33,17 @@
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"
     },
+    "gpt-5.3-codex": {
+      "id": "gpt-5.3-codex",
+      "context_window": 400000,
+      "max_output": 128000,
+      "supports_reasoning": true,
+      "input_usd_per_million": 1.75,
+      "output_usd_per_million": 14.0,
+      "modalities": ["text"],
+      "supported_parameters": ["reasoning"],
+      "provenance": "bundled"
+    },
     "gpt-5.6": {
       "id": "gpt-5.6",
       "context_window": 1050000,
@@ -201,6 +212,28 @@
       "supports_reasoning": true,
       "input_usd_per_million": 5.0,
       "output_usd_per_million": 25.0,
+      "modalities": ["text"],
+      "supported_parameters": ["reasoning"],
+      "provenance": "bundled"
+    },
+    "claude-sonnet-5": {
+      "id": "claude-sonnet-5",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "supports_reasoning": true,
+      "input_usd_per_million": 3.0,
+      "output_usd_per_million": 15.0,
+      "modalities": ["text"],
+      "supported_parameters": ["reasoning"],
+      "provenance": "bundled"
+    },
+    "claude-fable-5": {
+      "id": "claude-fable-5",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "supports_reasoning": true,
+      "input_usd_per_million": 10.0,
+      "output_usd_per_million": 50.0,
       "modalities": ["text"],
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"

@@ -5,9 +5,7 @@
 //! Plan usage is credit/quota based and is intentionally left unknown until a
 //! reliable balance endpoint exists.
 
-#[cfg(test)]
-use chrono::TimeZone;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use codewhale_config::pricing::TokenUsage;
 
 use crate::config::ApiProvider;
@@ -121,12 +119,18 @@ pub fn has_pricing_for_model(model: &str) -> bool {
     pricing_for_model(model).is_some()
 }
 
-fn pricing_for_model_at(model: &str, _now: DateTime<Utc>) -> Option<ModelPricing> {
+fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing> {
     let lower = model.to_lowercase();
     if lower.starts_with("deepseek-ai/") {
         // NVIDIA NIM-hosted DeepSeek uses NVIDIA's catalog/account terms, not
         // DeepSeek Platform pricing. Avoid showing misleading DeepSeek costs.
         return None;
+    }
+    if lower == "claude-sonnet-5" {
+        // Time-aware introductory pricing; resolved ahead of the catalog so
+        // the intro rate is honored while it lasts (same pattern as
+        // deepseek_v4_pro_pricing() / #2489).
+        return Some(claude_sonnet_5_pricing(now));
     }
     if let Some(pricing) = known_pricing_for_model(&lower) {
         return Some(pricing);
@@ -162,6 +166,11 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         "claude-opus-4-8" => Some(usd_only_pricing(0.50, 5.00, 25.00)),
         "claude-sonnet-4-6" => Some(usd_only_pricing(0.30, 3.00, 15.00)),
         "claude-haiku-4-5" => Some(usd_only_pricing(0.10, 1.00, 5.00)),
+        // Claude Fable 5 (GA 2026-06-09). Its newer tokenizer produces ~30%
+        // more tokens for the same text than prior Claude models, so raw
+        // per-token rate comparisons against other Claude rows undercount its
+        // effective cost. Cache-write is 12.50 (5m) / 20.00 (1h) upstream.
+        "claude-fable-5" => Some(usd_only_pricing(1.00, 10.00, 50.00)),
         // Z.ai GLM-5.2 cache-read rate per https://docs.z.ai/guides/overview/pricing
         // (cache storage limited-time free).
         "z-ai/glm-5.2" | "glm-5.2" => Some(usd_only_pricing(0.26, 1.40, 4.40)),
@@ -172,6 +181,7 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         // (successor: gpt-5.3-codex); API usage is still billed at these rates.
         // https://developers.openai.com/api/docs/models/gpt-5.3-codex
         "openai/gpt-5-codex" | "gpt-5-codex" => Some(usd_only_pricing(0.125, 1.25, 10.00)),
+        "openai/gpt-5.3-codex" | "gpt-5.3-codex" => Some(usd_only_pricing(0.175, 1.75, 14.00)),
         _ => None,
     };
     if explicit.is_some() {
@@ -209,6 +219,8 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         "qwen/qwen3.6-max-preview" => Some(usd_only_pricing(1.04, 1.04, 6.24)),
         "qwen/qwen3.6-27b" => Some(usd_only_pricing(0.15, 0.285, 2.40)),
         "qwen/qwen3.6-plus" => Some(usd_only_pricing(0.325, 0.325, 1.95)),
+        // Cache-write is 0.40 upstream; CurrencyPricing has no cache-write field.
+        "qwen/qwen3.7-plus" => Some(usd_only_pricing(0.064, 0.32, 1.28)),
         "qwen/qwen3.7-max" => Some(usd_only_pricing(0.25, 1.25, 3.75)),
 
         "google/gemma-4-31b-it" => Some(usd_only_pricing(0.09, 0.12, 0.35)),
@@ -233,6 +245,21 @@ fn usd_only_pricing(
             output_per_million,
         },
         cny: None,
+    }
+}
+
+/// Claude Sonnet 5 pricing (https://platform.claude.com/docs/en/about-claude/pricing):
+/// introductory 2.00 / 10.00 (cache-read 0.20) through 2026-08-31 UTC, then
+/// the standard 3.00 / 15.00 (cache-read 0.30).
+fn claude_sonnet_5_pricing(now: DateTime<Utc>) -> ModelPricing {
+    let intro_ends = Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("valid intro-pricing cutoff");
+    if now < intro_ends {
+        usd_only_pricing(0.20, 2.00, 10.00)
+    } else {
+        usd_only_pricing(0.30, 3.00, 15.00)
     }
 }
 
@@ -457,6 +484,7 @@ mod tests {
             ("claude-opus-4-8", 0.50, 5.00, 25.00),
             ("claude-sonnet-4-6", 0.30, 3.00, 15.00),
             ("claude-haiku-4-5", 0.10, 1.00, 5.00),
+            ("claude-fable-5", 1.00, 10.00, 50.00),
             ("gpt-5.5", 0.50, 5.00, 30.00),
             // GPT-5.5 Pro has no cached-input discount: cache-hit == input.
             ("gpt-5.5-pro", 30.00, 30.00, 180.00),
@@ -464,6 +492,8 @@ mod tests {
             ("gpt-5.6-terra", 0.25, 2.50, 15.00),
             ("gpt-5.6-luna", 0.10, 1.00, 6.00),
             ("gpt-5-codex", 0.125, 1.25, 10.00),
+            ("gpt-5.3-codex", 0.175, 1.75, 14.00),
+            ("qwen/qwen3.7-plus", 0.064, 0.32, 1.28),
             ("muse-spark-1.1", 1.25, 1.25, 4.25),
         ] {
             let pricing = pricing_for_model_at(model, Utc::now()).expect(model);
@@ -575,6 +605,32 @@ mod tests {
         assert_eq!(pricing.usd.input_cache_miss_per_million, 0.25);
         assert_eq!(pricing.usd.output_per_million, 1.25);
         assert!(pricing.cny.is_none());
+    }
+
+    #[test]
+    fn sonnet_5_uses_intro_pricing_before_2026_08_31_expiry() {
+        let before_expiry = Utc
+            .with_ymd_and_hms(2026, 8, 31, 23, 59, 59)
+            .single()
+            .unwrap();
+        let pricing = pricing_for_model_at("claude-sonnet-5", before_expiry).unwrap();
+
+        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.20);
+        assert_eq!(pricing.usd.input_cache_miss_per_million, 2.00);
+        assert_eq!(pricing.usd.output_per_million, 10.00);
+        assert!(pricing.cny.is_none());
+    }
+
+    #[test]
+    fn sonnet_5_uses_standard_pricing_after_intro_window() {
+        let after_expiry = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).single().unwrap();
+        let pricing = pricing_for_model_at("claude-sonnet-5", after_expiry).unwrap();
+
+        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.30);
+        assert_eq!(pricing.usd.input_cache_miss_per_million, 3.00);
+        assert_eq!(pricing.usd.output_per_million, 15.00);
+        assert!(pricing.cny.is_none());
+        assert!(has_pricing_for_model("claude-sonnet-5"));
     }
 
     #[test]
