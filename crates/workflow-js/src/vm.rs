@@ -359,7 +359,8 @@ async fn run_in_ctx(
         .catch(&ctx)
         .map_err(|err| WorkflowJsError::VmInit(format!("prelude failed: {err}")))?;
 
-    let wrapped = format!("(async () => {{\n{source}\n}})()");
+    let desugared = desugar_export_default(&source);
+    let wrapped = format!("(async () => {{\n{desugared}\n}})()");
     let promise = ctx
         .eval::<Promise, _>(wrapped)
         .catch(&ctx)
@@ -370,6 +371,39 @@ async fn run_in_ctx(
         .catch(&ctx)
         .map_err(|err| script_error(&cancel, err))?;
     js_value_to_json(&ctx, value)
+}
+
+/// Rewrite the documented module-style authoring shape
+/// (`export default async function (args) { ... }`) into the script form the
+/// VM actually evals. Sources are wrapped in an async IIFE, where the
+/// module-only `export` keyword is a syntax error, so without this every
+/// imperative `export default` workflow (including the #4131 dogfood
+/// fixtures) failed to parse. The default export is captured, invoked with
+/// the `args` global when it is a function, and its result becomes the run
+/// result; a non-function default export is returned as-is.
+fn desugar_export_default(source: &str) -> String {
+    let Some(line_idx) = source
+        .lines()
+        .position(|line| line.trim_start().starts_with("export default"))
+    else {
+        return source.to_string();
+    };
+    let mut lines: Vec<&str> = source.lines().collect();
+    let rewritten =
+        lines[line_idx].replacen("export default", "globalThis.__workflow_default =", 1);
+    let mut out = String::new();
+    for (idx, line) in lines.iter_mut().enumerate() {
+        if idx == line_idx {
+            out.push_str(&rewritten);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out.push_str(
+        ";{\n  const __wf_default = globalThis.__workflow_default;\n  delete globalThis.__workflow_default;\n  if (typeof __wf_default === \"function\") {\n    return await __wf_default(args);\n  }\n  if (__wf_default !== undefined) {\n    return __wf_default;\n  }\n}\n",
+    );
+    out
 }
 
 fn script_error(cancel: &CancelHandle, err: CaughtError<'_>) -> WorkflowJsError {

@@ -947,3 +947,54 @@ async fn promise_all_of_tasks_resolves_concurrently() {
     );
     assert_eq!(driver.spawn_count(), 2);
 }
+
+#[tokio::test]
+async fn export_default_async_function_runs_with_args() {
+    let driver = Arc::new(FakeDriver::new());
+    let source = r#"
+export default async function (args) {
+  return { doubled: args.n * 2 };
+}
+"#;
+    let value = run(&driver, source, json!({ "n": 21 })).await.unwrap();
+    assert_eq!(value, json!({ "doubled": 42 }));
+}
+
+#[tokio::test]
+async fn export_default_function_result_becomes_run_result() {
+    let driver = Arc::new(FakeDriver::new());
+    let source = r#"
+function helper() {
+  return "from-helper";
+}
+export default function () {
+  return helper();
+}
+"#;
+    let value = run(&driver, source, json!(null)).await.unwrap();
+    assert_eq!(value, json!("from-helper"));
+}
+
+#[tokio::test]
+async fn export_default_non_function_value_is_returned() {
+    let driver = Arc::new(FakeDriver::new());
+    let value = run(&driver, "export default 7;", json!(null))
+        .await
+        .unwrap();
+    assert_eq!(value, json!(7));
+}
+
+#[tokio::test]
+async fn plain_scripts_are_untouched_by_export_desugaring() {
+    let driver = Arc::new(FakeDriver::new());
+    // A string literal mentioning `export default` must not trigger the
+    // module desugaring path.
+    let value = run(
+        &driver,
+        "const note = \"export default docs\";\nreturn note.length;",
+        json!(null),
+    )
+    .await
+    .unwrap();
+    assert_eq!(value, json!(19));
+}
