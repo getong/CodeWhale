@@ -1506,6 +1506,10 @@ impl Engine {
                         .with_todos(self.config.todos.clone())
                         .with_parent_mode(self.current_mode)
                         .background_runtime();
+                        // #4042: thread the session's --disallowed-tools into
+                        // the child so tool restrictions flow down to sub-agents.
+                        runtime.worker_profile.denied_tools =
+                            self.config.disallowed_tools.clone().unwrap_or_default();
                         let route = resolve_subagent_assignment_route(
                             &runtime,
                             None,
@@ -2623,6 +2627,11 @@ impl Engine {
                 if matches!(input_policy.mode, AppMode::Plan) {
                     rt.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Plan);
                 }
+                // #4042: stamp the session's --disallowed-tools onto the parent
+                // runtime so every model-spawned sub-agent inherits the deny-list
+                // (plan-mode role override above is intentionally before this).
+                rt.worker_profile.denied_tools =
+                    self.config.disallowed_tools.clone().unwrap_or_default();
                 if let Some(context) = fork_context_for_runtime.clone() {
                     rt = rt.with_fork_context(context);
                 }

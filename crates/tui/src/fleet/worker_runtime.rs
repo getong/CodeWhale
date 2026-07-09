@@ -698,6 +698,16 @@ pub fn apply_exec_hardening(
             AgentWorkerToolProfile::Explicit(tools) => ToolScope::Explicit(tools.clone()),
         };
     }
+    // #4042: thread `FleetExecConfig.disallowed_tools` into the runtime profile's
+    // deny-list so it is enforced at run time even for `Inherited` tool profiles,
+    // which `filter_tool_profile` cannot narrow at spec time. Union with any
+    // already-inherited entries (deny never relaxes). The subprocess Fleet exec
+    // path separately passes `--disallowed-tools` on the CLI.
+    for rule in &exec.disallowed_tools {
+        if !spec.runtime_profile.denied_tools.contains(rule) {
+            spec.runtime_profile.denied_tools.push(rule.clone());
+        }
+    }
 
     // Append system prompt
     if !exec.append_system_prompt.is_empty() {

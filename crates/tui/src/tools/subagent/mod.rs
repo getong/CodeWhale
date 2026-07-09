@@ -1175,6 +1175,13 @@ struct SpawnRequest {
     /// When unset, the child inherits the parent's budget pool or the
     /// configured root default.
     token_budget: Option<u64>,
+    /// Extra tool deny-list from the caller, unioned with the parent runtime's
+    /// inherited deny-list. Deny always wins over allow (#4042).
+    disallowed_tools: Option<Vec<String>>,
+    /// When true (default), the child inherits the parent runtime's
+    /// `disallowed_tools`. Set `false` to start the child with a clean slate
+    /// (only the explicit `disallowed_tools` above, if any, then apply).
+    inherit_disallowed_tools: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4262,6 +4269,27 @@ async fn spawn_subagent_from_input(
     if let Some(workspace) = child_workspace {
         child_runtime.context.workspace = workspace;
     }
+    // #4042: merge the parent runtime's inherited deny-list with the caller's
+    // explicit `disallowed_tools`. `background_runtime()` already cloned the
+    // parent's `worker_profile.denied_tools` (the session `--disallowed-tools`),
+    // so by default the child inherits it. `inherit_disallowed_tools: false`
+    // drops *only* the inherited list; an explicit caller `disallowed_tools`
+    // always applies (union, deny never relaxes).
+    if !spawn_request.inherit_disallowed_tools {
+        child_runtime.worker_profile.denied_tools.clear();
+    }
+    if let Some(ref caller_deny) = spawn_request.disallowed_tools {
+        for tool in caller_deny {
+            if !child_runtime
+                .worker_profile
+                .denied_tools
+                .iter()
+                .any(|existing| existing == tool)
+            {
+                child_runtime.worker_profile.denied_tools.push(tool.clone());
+            }
+        }
+    }
     // #4193 seam 2: normalize/validate the requested model against the CHILD's
     // (pinned) provider, not the session provider. `child_runtime` carries the
     // provider-B client set above, so a profile-less/`inherit` member still
@@ -6303,6 +6331,15 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     let token_budget =
         parse_optional_positive_u64(input, &["token_budget", "tokenBudget", "max_tokens"])?;
 
+    // #4042: optional caller-supplied tool deny-list (unioned with the parent's
+    // inherited deny-list) and the inheritance opt-out flag (default inherits).
+    let disallowed_tools = parse_disallowed_tools(input)?;
+    let inherit_disallowed_tools = parse_optional_bool(
+        input,
+        &["inherit_disallowed_tools", "inheritDisallowedTools"],
+    )
+    .unwrap_or(true);
+
     Ok(SpawnRequest {
         session_name,
         prompt: prompt.clone(),
@@ -6321,6 +6358,8 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         fork_context,
         max_depth,
         token_budget,
+        disallowed_tools,
+        inherit_disallowed_tools,
     })
 }
 
@@ -6511,6 +6550,31 @@ fn parse_optional_bool(input: &Value, names: &[&str]) -> Option<bool> {
         .iter()
         .find_map(|name| input.get(*name))
         .and_then(Value::as_bool)
+}
+
+/// Parse an optional caller-supplied `disallowed_tools` array (#4042). Mirrors
+/// the `allowed_tools` parsing: trimmed, de-duplicated, non-empty-only. Returns
+/// `None` when the key is absent or yields no usable entries so the union merge
+/// in `spawn_subagent_from_input` only runs when there is something to add.
+fn parse_disallowed_tools(input: &Value) -> Result<Option<Vec<String>>, ToolError> {
+    let Some(array) = input.get("disallowed_tools").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let mut tools = Vec::new();
+    for item in array {
+        let Some(tool) = item.as_str() else {
+            continue;
+        };
+        let trimmed = tool.trim();
+        if !trimmed.is_empty() && !tools.iter().any(|existing: &String| existing == trimmed) {
+            tools.push(trimmed.to_string());
+        }
+    }
+    if tools.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(tools))
+    }
 }
 
 fn parse_optional_positive_u64(input: &Value, names: &[&str]) -> Result<Option<u64>, ToolError> {
@@ -7448,6 +7512,11 @@ struct SubAgentToolRegistry {
     /// `None` → full inheritance (no allowlist filter applied). `Some(list)` →
     /// only the listed tools are visible to the model and callable.
     allowed_tools: Option<Vec<String>>,
+    /// Tool deny-list inherited from the parent runtime's `worker_profile`
+    /// (#4042). Deny always wins over allow, even when a tool is in both the
+    /// allowlist and this list. Wildcard matching mirrors the session-side
+    /// `command_denies_tool` (exact + `prefix*`, case-insensitive).
+    disallowed_tools: Vec<String>,
     auto_approve: bool,
     /// The role/type of the sub-agent that this registry belongs to. Used to
     /// decide whether `Suggest`-level tools (write/edit/patch) may run inside
@@ -7518,6 +7587,7 @@ impl SubAgentToolRegistry {
 
         Self {
             allowed_tools: explicit_allowed_tools,
+            disallowed_tools: runtime.worker_profile.denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             agent_type,
             runtime_profile: runtime.worker_profile,
@@ -7566,10 +7636,33 @@ impl SubAgentToolRegistry {
         }
     }
 
+    /// Check whether a tool name is denied by the `disallowed_tools` list, using
+    /// the same matching logic as the session-side `command_denies_tool`: exact
+    /// match + `prefix*` wildcard, case-insensitive (#4042, #3027).
+    fn is_tool_denied(&self, name: &str) -> bool {
+        if self.disallowed_tools.is_empty() {
+            return false;
+        }
+        let tool_name = name.to_ascii_lowercase();
+        self.disallowed_tools.iter().any(|rule| {
+            let rule = rule.to_ascii_lowercase();
+            if let Some(prefix) = rule.strip_suffix('*') {
+                tool_name.starts_with(prefix)
+            } else {
+                tool_name == rule
+            }
+        })
+    }
+
     /// Whether a given tool name is permitted under this child's filter.
     /// `None` filter = everything permitted.
     fn is_tool_allowed(&self, name: &str) -> bool {
         if name == "agent" && !self.can_spawn_child {
+            return false;
+        }
+        // Deny always wins over allow — check the deny-list first so a tool in
+        // both the allowlist and the deny-list is still blocked (#4042).
+        if self.is_tool_denied(name) {
             return false;
         }
         match &self.allowed_tools {
@@ -7591,6 +7684,10 @@ impl SubAgentToolRegistry {
         filtered
             .into_iter()
             .filter(|tool| tool.name != "agent" || self.can_spawn_child)
+            // #4042: hide explicitly disallowed tools so the model never sees
+            // them in the function-calling schema (defense-in-depth with the
+            // `is_tool_allowed` / `execute` guards).
+            .filter(|tool| !self.is_tool_denied(&tool.name))
             // #3217: hide tools the role posture forbids so the model never
             // even sees write/edit/patch (read-only roles) or shell (no-shell
             // roles). Defense-in-depth with the `execute` guard below.

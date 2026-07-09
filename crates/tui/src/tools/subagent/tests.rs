@@ -6876,3 +6876,385 @@ fn agent_action_parses_wait_aliases() {
         );
     }
 }
+
+// ===========================================================================
+// #4042 — sub-agent tool restriction inheritance (Phase 1, harvested from
+// PR #4096 by @JayBeest).
+//
+// These tests verify that the parent session's `--disallowed-tools` flows into
+// spawned sub-agents through `SubAgentRuntime` → `SubAgentToolRegistry`. The
+// deny-list is stamped onto `worker_profile.denied_tools` by the engine and
+// cloned through `child_runtime()`/`background_runtime()`, so a registry built
+// from a child runtime enforces it in `is_tool_allowed()`, `tools_for_model()`,
+// and `execute()`.
+//
+// Deny always wins over allow. Wildcards (`prefix*`) and case-insensitive
+// matching mirror the session-side `command_denies_tool()`.
+// ===========================================================================
+
+/// Build a stub runtime with the parent's `disallowed_tools` set on the
+/// `WorkerRuntimeProfile`. The registry reads deny lists from the profile at
+/// construction, and `child_runtime()` clones the profile so the list
+/// propagates across generations.
+fn stub_runtime_with_disallowed(disallowed: Vec<String>) -> SubAgentRuntime {
+    let mut rt = stub_runtime();
+    rt.worker_profile.denied_tools = disallowed;
+    rt
+}
+
+/// Build a `SubAgentToolRegistry` wired with `disallowed_tools`. Passes the
+/// runtime through `SubAgentToolRegistry::new()` so the constructor picks up
+/// `worker_profile.denied_tools`. `allowed_tools` is forwarded directly.
+fn new_registry_with_disallowed(
+    runtime: SubAgentRuntime,
+    allowed_tools: Option<Vec<String>>,
+) -> SubAgentToolRegistry {
+    SubAgentToolRegistry::new(
+        runtime,
+        SubAgentType::General,
+        allowed_tools,
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    )
+}
+
+#[test]
+fn test_disallowed_tools_inheritance_denies_tool() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime_with_disallowed(vec!["exec_shell".to_string(), "write_file".to_string()]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let registry = new_registry_with_disallowed(runtime, None);
+
+    assert!(
+        !registry.is_tool_allowed("exec_shell"),
+        "exec_shell should be denied"
+    );
+    assert!(
+        !registry.is_tool_allowed("write_file"),
+        "write_file should be denied"
+    );
+    assert!(
+        registry.is_tool_allowed("read_file"),
+        "read_file should still be allowed"
+    );
+    assert!(
+        registry.is_tool_allowed("grep_files"),
+        "unrelated tools should be allowed"
+    );
+
+    let tools = registry.tools_for_model(&SubAgentType::General);
+    let names: HashSet<_> = tools.into_iter().map(|t| t.name).collect();
+    assert!(!names.contains("exec_shell"), "catalog excludes exec_shell");
+    assert!(!names.contains("write_file"), "catalog excludes write_file");
+    assert!(names.contains("read_file"), "catalog includes read_file");
+}
+
+#[test]
+fn test_disallowed_tools_deny_wins_over_allow() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime_with_disallowed(vec!["exec_shell".to_string()]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    // exec_shell is in BOTH the allowlist AND the deny list — deny must win.
+    let registry = new_registry_with_disallowed(
+        runtime,
+        Some(vec!["exec_shell".to_string(), "read_file".to_string()]),
+    );
+
+    assert!(
+        !registry.is_tool_allowed("exec_shell"),
+        "deny must win over allow"
+    );
+    assert!(
+        registry.is_tool_allowed("read_file"),
+        "read_file is allowed and not denied"
+    );
+
+    let tools = registry.tools_for_model(&SubAgentType::General);
+    let names: HashSet<_> = tools.into_iter().map(|t| t.name).collect();
+    assert!(
+        !names.contains("exec_shell"),
+        "catalog must exclude denied tool even when allowlisted"
+    );
+    assert!(names.contains("read_file"), "catalog includes allowed tool");
+}
+
+#[test]
+fn test_disallowed_tools_wildcard_matching() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime_with_disallowed(vec!["mcp_*".to_string()]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let registry = new_registry_with_disallowed(runtime, None);
+
+    assert!(
+        !registry.is_tool_allowed("mcp_github_list_prs"),
+        "mcp_* wildcard should deny all MCP tools"
+    );
+    assert!(
+        !registry.is_tool_allowed("mcp_database_query"),
+        "mcp_* wildcard denies any server prefix"
+    );
+    assert!(
+        registry.is_tool_allowed("read_file"),
+        "non-MCP tools are unaffected by mcp_* deny"
+    );
+}
+
+#[test]
+fn test_disallowed_tools_case_insensitive_match() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime_with_disallowed(vec!["Exec_Shell".to_string()]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let registry = new_registry_with_disallowed(runtime, None);
+
+    assert!(
+        !registry.is_tool_allowed("exec_shell"),
+        "case-insensitive: Exec_Shell denies exec_shell"
+    );
+    assert!(
+        !registry.is_tool_allowed("EXEC_SHELL"),
+        "case-insensitive: Exec_Shell denies EXEC_SHELL"
+    );
+    assert!(
+        registry.is_tool_allowed("read_file"),
+        "unrelated tool unaffected"
+    );
+}
+
+#[test]
+fn test_disallowed_tools_specific_server_wildcard() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime_with_disallowed(vec!["mcp_dangerous_*".to_string()]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let registry = new_registry_with_disallowed(runtime, None);
+
+    assert!(
+        !registry.is_tool_allowed("mcp_dangerous_read"),
+        "specific server wildcard denies its tools"
+    );
+    assert!(
+        registry.is_tool_allowed("mcp_safe_query"),
+        "different server prefix is not denied"
+    );
+}
+
+#[test]
+fn test_disallowed_tools_tools_for_model_excludes_denied() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime_with_disallowed(vec![
+        "exec_shell".to_string(),
+        "write_file".to_string(),
+        "apply_patch".to_string(),
+    ]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let registry = new_registry_with_disallowed(runtime, None);
+
+    let tools = registry.tools_for_model(&SubAgentType::General);
+    let names: HashSet<_> = tools.into_iter().map(|t| t.name).collect();
+
+    assert!(!names.contains("exec_shell"), "catalog excludes exec_shell");
+    assert!(!names.contains("write_file"), "catalog excludes write_file");
+    assert!(
+        !names.contains("apply_patch"),
+        "catalog excludes apply_patch"
+    );
+    assert!(names.contains("read_file"), "catalog includes read_file");
+    assert!(names.contains("grep_files"), "catalog includes grep_files");
+}
+
+#[tokio::test]
+async fn test_disallowed_tools_execute_rejects_denied_tool() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime_with_disallowed(vec!["exec_shell".to_string()]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.allow_shell = true; // remove posture as a confound
+    let registry = new_registry_with_disallowed(runtime, None);
+
+    let result = registry
+        .execute("agent_test", "exec_shell", json!({"command": "echo hi"}))
+        .await;
+    assert!(
+        result.is_err(),
+        "execute must reject a tool denied by disallowed_tools"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not allowed") || err.contains("denied"),
+        "error should mention denial: {err}"
+    );
+}
+
+// === deny-list propagation through runtime cloning ===
+
+#[test]
+fn test_disallowed_tools_propagates_through_child_runtime() {
+    let runtime = stub_runtime_with_disallowed(vec!["exec_shell".to_string()]);
+    let child = runtime.child_runtime();
+    assert_eq!(
+        child.worker_profile.denied_tools,
+        vec!["exec_shell".to_string()],
+        "child_runtime() must preserve parent's denied_tools"
+    );
+}
+
+#[test]
+fn test_disallowed_tools_propagates_through_background_runtime() {
+    let runtime = stub_runtime_with_disallowed(vec!["write_file".to_string()]);
+    let bg = runtime.background_runtime();
+    assert_eq!(
+        bg.worker_profile.denied_tools,
+        vec!["write_file".to_string()],
+        "background_runtime() must preserve parent's denied_tools"
+    );
+}
+
+#[test]
+fn test_disallowed_tools_across_two_generations() {
+    let tmp = tempdir().expect("tempdir");
+    let mut parent = stub_runtime_with_disallowed(vec!["exec_shell".to_string()]);
+    parent.context = ToolContext::new(tmp.path().to_path_buf());
+    let parent_registry = new_registry_with_disallowed(parent.clone(), None);
+    assert!(!parent_registry.is_tool_allowed("exec_shell"));
+
+    // Child A inherits from parent.
+    let child_a = parent.child_runtime();
+    assert_eq!(
+        child_a.worker_profile.denied_tools,
+        vec!["exec_shell".to_string()]
+    );
+
+    // Child B inherits from child A — same deny list.
+    let mut child_b = child_a.child_runtime();
+    child_b.context = ToolContext::new(tmp.path().to_path_buf());
+    let b_registry = new_registry_with_disallowed(child_b, None);
+    assert!(
+        !b_registry.is_tool_allowed("exec_shell"),
+        "third-generation sub-agent still inherits deny list"
+    );
+    assert!(b_registry.is_tool_allowed("read_file"));
+}
+
+// === spawn-path opt-out simulation ===
+
+#[test]
+fn test_disallowed_tools_opt_out_clears_inherited_denies() {
+    // Simulate the spawn-path merge: parent runtime has denies, child sets
+    // inherit_disallowed_tools = false — the inherited denies are cleared.
+    let tmp = tempdir().expect("tempdir");
+    let runtime =
+        stub_runtime_with_disallowed(vec!["exec_shell".to_string(), "write_file".to_string()]);
+    let mut child_runtime = runtime.child_runtime();
+    child_runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    assert!(
+        !child_runtime.worker_profile.denied_tools.is_empty(),
+        "child starts with parent's denies"
+    );
+
+    // Simulate spawn merge: inherit_disallowed_tools = false, no caller deny.
+    child_runtime.worker_profile.denied_tools.clear();
+
+    let registry = new_registry_with_disallowed(child_runtime, None);
+    assert!(
+        registry.is_tool_allowed("exec_shell"),
+        "exec_shell allowed after opt-out cleared parent denies"
+    );
+    assert!(
+        registry.is_tool_allowed("write_file"),
+        "write_file allowed after opt-out cleared parent denies"
+    );
+    assert!(registry.is_tool_allowed("read_file"));
+}
+
+#[test]
+fn test_disallowed_tools_opt_out_keeps_explicit_caller_deny() {
+    // Opt-out clears inherited denies, but explicit caller disallowed_tools
+    // still apply (the union merge — caller deny always applies).
+    let tmp = tempdir().expect("tempdir");
+    let runtime =
+        stub_runtime_with_disallowed(vec!["exec_shell".to_string(), "write_file".to_string()]);
+    let mut child_runtime = runtime.child_runtime();
+    child_runtime.context = ToolContext::new(tmp.path().to_path_buf());
+
+    // Simulate spawn merge: inherit_disallowed_tools = false, then caller adds
+    // ["write_file"].
+    child_runtime.worker_profile.denied_tools.clear();
+    child_runtime
+        .worker_profile
+        .denied_tools
+        .push("write_file".to_string());
+
+    let registry = new_registry_with_disallowed(child_runtime, None);
+    // Parent denied exec_shell, but opt-out cleared it → allowed.
+    assert!(
+        registry.is_tool_allowed("exec_shell"),
+        "exec_shell allowed (parent deny cleared by opt-out)"
+    );
+    // Caller explicitly denied write_file → still denied.
+    assert!(
+        !registry.is_tool_allowed("write_file"),
+        "write_file denied by caller's explicit list"
+    );
+    assert!(registry.is_tool_allowed("read_file"));
+}
+
+// === parse_spawn_request disallowed_tools ===
+
+#[test]
+fn test_parse_spawn_request_reads_disallowed_tools() {
+    let input = json!({
+        "prompt": "do something",
+        "disallowed_tools": ["exec_shell", "write_file"]
+    });
+    let req = parse_spawn_request(&input).expect("parse");
+    assert_eq!(
+        req.disallowed_tools,
+        Some(vec!["exec_shell".to_string(), "write_file".to_string()])
+    );
+}
+
+#[test]
+fn test_parse_spawn_request_disallowed_tools_dedupes_and_trims() {
+    let input = json!({
+        "prompt": "do something",
+        "disallowed_tools": [" exec_shell ", "exec_shell", "", "  ", "write_file"]
+    });
+    let req = parse_spawn_request(&input).expect("parse");
+    assert_eq!(
+        req.disallowed_tools,
+        Some(vec!["exec_shell".to_string(), "write_file".to_string()]),
+        "blanks and duplicates are dropped"
+    );
+}
+
+#[test]
+fn test_parse_spawn_request_disallowed_tools_defaults_to_none() {
+    let input = json!({"prompt": "do something"});
+    let req = parse_spawn_request(&input).expect("parse");
+    assert!(
+        req.disallowed_tools.is_none(),
+        "disallowed_tools should be None when not provided"
+    );
+}
+
+#[test]
+fn test_parse_spawn_request_inherit_disallowed_tools_defaults_true() {
+    let input = json!({"prompt": "do something"});
+    let req = parse_spawn_request(&input).expect("parse");
+    assert!(
+        req.inherit_disallowed_tools,
+        "inherit_disallowed_tools should default to true"
+    );
+}
+
+#[test]
+fn test_parse_spawn_request_inherit_disallowed_tools_explicit_false() {
+    let input = json!({
+        "prompt": "do something",
+        "inherit_disallowed_tools": false
+    });
+    let req = parse_spawn_request(&input).expect("parse");
+    assert!(
+        !req.inherit_disallowed_tools,
+        "inherit_disallowed_tools should parse an explicit false"
+    );
+}
