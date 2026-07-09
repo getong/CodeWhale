@@ -12,10 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use codewhale_workflow::{
     AgentType, BranchResult, BranchSpec, BudgetSpec, ControlNodeKind, ControlNodeResult,
-    IsolationMode, LeafResult, LeafSpec, ReduceSpec, SequenceSpec, TaskMode,
+    LeafResult, LeafSpec, ReduceSpec, SequenceSpec, TaskMode,
     WorkflowExecution as IrWorkflowExecution, WorkflowMemoUsage, WorkflowNode,
     WorkflowRunStatus as IrWorkflowRunStatus, WorkflowSpec, WorkflowUsage,
-    compile_javascript_workflow, compile_typescript_workflow,
+    compile_javascript_workflow, compile_typescript_workflow, leaf_wants_worktree,
 };
 use codewhale_workflow_js::{
     BudgetSnapshot, DriverError, ProgressEvent, SpawnedTask, TaskCompletion, TaskRequest,
@@ -880,7 +880,7 @@ impl DeclarativeWorkflowLowerer {
 
     fn lower_node(&mut self, node: &WorkflowNode, phase: Option<&str>) -> Result<(), ToolError> {
         match node {
-            WorkflowNode::Leaf(spec) => self.lower_leaf(spec, phase),
+            WorkflowNode::Leaf(spec) => self.lower_leaf(spec, phase, /* parallel */ false),
             WorkflowNode::BranchSet(spec) => self.lower_branch(spec),
             WorkflowNode::Sequence(spec) => self.lower_sequence(spec),
             WorkflowNode::Reduce(spec) => self.lower_reduce(spec),
@@ -891,11 +891,16 @@ impl DeclarativeWorkflowLowerer {
         }
     }
 
-    fn lower_leaf(&mut self, spec: &LeafSpec, phase: Option<&str>) -> Result<(), ToolError> {
+    fn lower_leaf(
+        &mut self,
+        spec: &LeafSpec,
+        phase: Option<&str>,
+        parallel: bool,
+    ) -> Result<(), ToolError> {
         self.line(format!(
             "__results[{}] = await task({});",
             js_string(&spec.id),
-            leaf_task_options_expression(spec, phase)?
+            leaf_task_options_expression(spec, phase, parallel)?
         ));
         Ok(())
     }
@@ -916,9 +921,11 @@ impl DeclarativeWorkflowLowerer {
             let temp = self.next_temp("parallel");
             self.line(format!("const {temp} = await Promise.all(["));
             for leaf in &leaves {
+                // Parallel write-capable children default to worktree isolation
+                // (#4120) unless the plan explicitly sets isolation: shared.
                 self.line(format!(
                     "  task({}),",
-                    leaf_task_options_expression(leaf, Some(&spec.id))?
+                    leaf_task_options_expression(leaf, Some(&spec.id), /* parallel */ true)?
                 ));
             }
             self.line("]);");
@@ -1017,13 +1024,19 @@ fn leaf_description(spec: &LeafSpec) -> String {
     description
 }
 
-fn leaf_task_options_expression(spec: &LeafSpec, phase: Option<&str>) -> Result<String, ToolError> {
+fn leaf_task_options_expression(
+    spec: &LeafSpec,
+    phase: Option<&str>,
+    parallel: bool,
+) -> Result<String, ToolError> {
     validate_leaf_runtime_contract(spec)?;
     Ok(task_options_expression(
         leaf_description_expression(spec),
         leaf_subagent_type(spec)?,
         spec.profile.as_deref(),
-        matches!(spec.isolation, IsolationMode::Worktree),
+        // Parallel write-capable children default to worktree isolation (#4120).
+        // Explicit isolation: shared is the approved same-worktree override.
+        leaf_wants_worktree(spec, parallel),
         spec.budget.max_tokens,
         &spec.id,
         phase,
@@ -2230,6 +2243,7 @@ mod tests {
     use crate::tools::ToolRegistryBuilder;
     use crate::tools::subagent::{SubAgentRuntime, new_shared_subagent_manager};
     use axum::{Json, Router, routing::post};
+    use codewhale_workflow::{IsolationMode, leaf_is_write_capable};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -2260,6 +2274,222 @@ mod tests {
         assert_eq!(
             parse_workflow_action(&json!({"action": "run"})).unwrap(),
             WorkflowAction::Run
+        );
+    }
+
+    #[test]
+    fn parallel_write_children_default_to_worktree_isolation() {
+        // #4120: write-capable parallel leaves get worktree: true by default.
+        let source = r#"
+export default workflow({
+  "goal": "parallel write isolation default",
+  "nodes": [
+    {
+      "branch": {
+        "id": "implement",
+        "parallel": true,
+        "children": [
+          {
+            "agent": {
+              "id": "left",
+              "prompt": "Patch left lane",
+              "agent_type": "implementer",
+              "mode": "read_write",
+              "file_scope": ["src/left.rs"]
+            }
+          },
+          {
+            "agent": {
+              "id": "right",
+              "prompt": "Patch right lane",
+              "agent_type": "implementer",
+              "mode": "read_write",
+              "file_scope": ["src/right.rs"]
+            }
+          }
+        ]
+      }
+    }
+  ]
+});
+"#;
+        let adapted = adapt_workflow_source(source, None).expect("lower parallel write workflow");
+        let spec = adapted.spec.expect("declarative spec");
+        let WorkflowNode::BranchSet(branch) = &spec.nodes[0] else {
+            panic!("expected branch_set");
+        };
+        assert!(branch.parallel);
+        for child in &branch.children {
+            let WorkflowNode::Leaf(leaf) = child else {
+                panic!("expected leaf");
+            };
+            assert!(leaf_is_write_capable(leaf));
+            assert!(
+                leaf_wants_worktree(leaf, true),
+                "parallel write leaf {} should default to worktree",
+                leaf.id
+            );
+            assert_eq!(leaf.isolation, IsolationMode::Auto);
+        }
+        assert!(
+            adapted.source.contains("worktree: true"),
+            "lowered JS should request worktree isolation:\n{}",
+            adapted.source
+        );
+        // Both parallel children should carry the worktree flag.
+        assert_eq!(
+            adapted.source.matches("worktree: true").count(),
+            2,
+            "each parallel write child should get worktree: true:\n{}",
+            adapted.source
+        );
+    }
+
+    #[test]
+    fn parallel_write_same_worktree_requires_explicit_shared_isolation() {
+        // #4120: isolation: shared is the approved same-worktree override.
+        let source = r#"
+export default workflow({
+  "goal": "parallel write same-worktree override",
+  "nodes": [
+    {
+      "branch": {
+        "id": "implement",
+        "parallel": true,
+        "children": [
+          {
+            "agent": {
+              "id": "shared-writer",
+              "prompt": "Patch in the parent checkout",
+              "agent_type": "implementer",
+              "mode": "read_write",
+              "isolation": "shared",
+              "file_scope": ["src/shared.rs"]
+            }
+          },
+          {
+            "agent": {
+              "id": "isolated-writer",
+              "prompt": "Patch in a worktree",
+              "agent_type": "implementer",
+              "mode": "read_write",
+              "isolation": "worktree",
+              "file_scope": ["src/isolated.rs"]
+            }
+          }
+        ]
+      }
+    }
+  ]
+});
+"#;
+        let adapted =
+            adapt_workflow_source(source, None).expect("lower same-worktree override workflow");
+        let spec = adapted.spec.expect("declarative spec");
+        let WorkflowNode::BranchSet(branch) = &spec.nodes[0] else {
+            panic!("expected branch_set");
+        };
+        let leaves: Vec<&LeafSpec> = branch
+            .children
+            .iter()
+            .map(|child| match child {
+                WorkflowNode::Leaf(leaf) => leaf,
+                _ => panic!("expected leaf"),
+            })
+            .collect();
+        assert_eq!(leaves[0].isolation, IsolationMode::Shared);
+        assert!(
+            !leaf_wants_worktree(leaves[0], true),
+            "explicit shared should keep same-worktree"
+        );
+        assert_eq!(leaves[1].isolation, IsolationMode::Worktree);
+        assert!(leaf_wants_worktree(leaves[1], true));
+
+        // Only the explicit worktree child should emit worktree: true.
+        assert_eq!(
+            adapted.source.matches("worktree: true").count(),
+            1,
+            "same-worktree override must not force worktree on shared leaf:\n{}",
+            adapted.source
+        );
+        assert!(
+            adapted.source.contains("shared-writer") && adapted.source.contains("isolated-writer"),
+            "both children should still be lowered:\n{}",
+            adapted.source
+        );
+    }
+
+    #[test]
+    fn parallel_read_only_children_do_not_default_to_worktree() {
+        let source = r#"
+export default workflow({
+  "goal": "parallel read-only stays shared",
+  "nodes": [
+    {
+      "branch": {
+        "id": "audit",
+        "parallel": true,
+        "children": [
+          {
+            "agent": {
+              "id": "review-a",
+              "prompt": "Review A",
+              "agent_type": "review",
+              "mode": "read_only"
+            }
+          },
+          {
+            "agent": {
+              "id": "review-b",
+              "prompt": "Review B",
+              "agent_type": "verifier",
+              "mode": "read_only"
+            }
+          }
+        ]
+      }
+    }
+  ]
+});
+"#;
+        let adapted = adapt_workflow_source(source, None).expect("lower parallel read-only");
+        assert!(
+            !adapted.source.contains("worktree: true"),
+            "read-only parallel children should not get worktree isolation:\n{}",
+            adapted.source
+        );
+    }
+
+    #[test]
+    fn sequential_write_children_do_not_default_to_worktree() {
+        let source = r#"
+export default workflow({
+  "goal": "sequential write stays shared by default",
+  "nodes": [
+    {
+      "sequence": {
+        "id": "implement",
+        "children": [
+          {
+            "agent": {
+              "id": "writer",
+              "prompt": "Patch sequentially",
+              "agent_type": "implementer",
+              "mode": "read_write",
+              "file_scope": ["src/main.rs"]
+            }
+          }
+        ]
+      }
+    }
+  ]
+});
+"#;
+        let adapted = adapt_workflow_source(source, None).expect("lower sequential write");
+        assert!(
+            !adapted.source.contains("worktree: true"),
+            "sequential writes should not default to worktree:\n{}",
+            adapted.source
         );
     }
 
