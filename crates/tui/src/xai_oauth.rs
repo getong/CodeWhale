@@ -211,7 +211,6 @@ pub fn get_credentials() -> Result<XaiOAuthCredentials> {
 /// Public residual entry point for CLI/TUI wiring (`codewhale auth` /
 /// slash command). Call from a headless or TUI surface that can print the
 /// verification URL.
-#[allow(dead_code)]
 pub fn device_code_login() -> Result<XaiOAuthCredentials> {
     let issuer = std::env::var("GROK_OIDC_ISSUER")
         .or_else(|_| std::env::var("XAI_OIDC_ISSUER"))
@@ -234,6 +233,11 @@ pub fn device_code_login() -> Result<XaiOAuthCredentials> {
     eprintln!("  Open:  {verify}");
     eprintln!("  Code:  {}", device.user_code);
     eprintln!("Waiting for approval in the browser… (Ctrl+C to abort)");
+    if std::env::var_os("CODEWHALE_XAI_OAUTH_NO_BROWSER").is_none()
+        && let Err(err) = webbrowser::open(&verify)
+    {
+        eprintln!("Could not open the browser automatically: {err}");
+    }
 
     let interval = device.interval.unwrap_or(DEVICE_POLL_DEFAULT_SECS).max(1);
     let deadline = std::time::Instant::now()
@@ -503,7 +507,6 @@ fn refresh_access_token(
     Ok(body)
 }
 
-#[allow(dead_code)]
 fn request_device_code(issuer: &str, client_id: &str, scopes: &str) -> Result<DeviceCodeResponse> {
     let url = format!("{}/oauth2/device/code", issuer.trim_end_matches('/'));
     let client = crate::tls::reqwest_blocking_client_builder()
@@ -533,7 +536,6 @@ fn request_device_code(issuer: &str, client_id: &str, scopes: &str) -> Result<De
     Ok(body)
 }
 
-#[allow(dead_code)]
 fn poll_device_token(issuer: &str, client_id: &str, device_code: &str) -> Result<TokenResponse> {
     let url = format!("{}/oauth2/token", issuer.trim_end_matches('/'));
     let client = crate::tls::reqwest_blocking_client_builder()
@@ -630,10 +632,9 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn auth_mode_accepts_oauth_aliases() {
@@ -657,7 +658,7 @@ mod tests {
 
     #[test]
     fn loads_fresh_token_from_grok_auth_json() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_support::lock_test_env();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("auth.json");
         let future = rfc3339_from_now(3600);
@@ -673,7 +674,8 @@ mod tests {
             }
         });
         fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
-        // SAFETY: serialized by ENV_LOCK; restored below.
+        // SAFETY: serialized by the process-wide test environment lock;
+        // restored below.
         unsafe {
             std::env::set_var("GROK_AUTH_PATH", &path);
         }
@@ -688,6 +690,7 @@ mod tests {
 
     #[test]
     fn missing_file_message_mentions_oauth_paths() {
+        let _guard = crate::test_support::lock_test_env();
         let msg = missing_auth_message();
         assert!(msg.contains("xAI OAuth credentials not found"), "{msg}");
         assert!(msg.contains("auth_mode"), "{msg}");
@@ -708,5 +711,63 @@ mod tests {
         assert_eq!(GROK_OIDC_CLIENT_ID.len(), 36);
         // Keep device_code_login referenced so the residual entry point stays linked.
         let _ = device_code_login as fn() -> Result<XaiOAuthCredentials>;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_code_login_exchanges_and_persists_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/device/code"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_code": "device-token",
+                "user_code": "CW-TEST",
+                "verification_uri": format!("{}/verify", server.uri()),
+                "expires_in": 60,
+                "interval": 1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "test-xai-access",
+                "refresh_token": "test-xai-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let auth_path = dir.path().join("grok-auth.json");
+        unsafe {
+            std::env::set_var("GROK_OIDC_ISSUER", server.uri());
+            std::env::set_var("GROK_AUTH_PATH", &auth_path);
+            std::env::set_var("CODEWHALE_XAI_OAUTH_NO_BROWSER", "1");
+        }
+        let result = tokio::task::block_in_place(device_code_login);
+        unsafe {
+            std::env::remove_var("GROK_OIDC_ISSUER");
+            std::env::remove_var("GROK_AUTH_PATH");
+            std::env::remove_var("CODEWHALE_XAI_OAUTH_NO_BROWSER");
+        }
+
+        let credentials = result.expect("device login");
+        assert_eq!(credentials.access_token, "test-xai-access");
+        assert_eq!(
+            credentials.refresh_token.as_deref(),
+            Some("test-xai-refresh")
+        );
+        let persisted = fs::read_to_string(&auth_path).expect("persisted auth file");
+        assert!(persisted.contains("test-xai-access"));
+        assert!(persisted.contains("test-xai-refresh"));
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

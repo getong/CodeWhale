@@ -1055,6 +1055,9 @@ struct AuthArgs {
 
 #[derive(Debug, Subcommand)]
 enum AuthCommand {
+    /// Sign in to xAI/Grok with an SSH-friendly device code.
+    #[command(name = "xai-device")]
+    XaiDevice,
     /// Show current provider and credential source state.
     /// Without `--provider`, shows all known providers.
     /// With `--provider`, shows detailed status for that provider.
@@ -1380,7 +1383,17 @@ fn run() -> Result<()> {
         }
         Some(Commands::Login(args)) => run_login_command(&mut store, args),
         Some(Commands::Logout) => run_logout_command(&mut store),
-        Some(Commands::Auth(args)) => run_auth_command(&mut store, args.command),
+        Some(Commands::Auth(args)) => match args.command {
+            AuthCommand::XaiDevice => {
+                let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
+                delegate_to_tui(
+                    &cli,
+                    &resolved_runtime,
+                    vec!["auth".to_string(), "xai-device".to_string()],
+                )
+            }
+            command => run_auth_command(&mut store, command),
+        },
         Some(Commands::McpServer) => run_mcp_server_command(&mut store),
         Some(Commands::Config(args)) => run_config_command(&mut store, args.command),
         Some(Commands::Model(args)) => {
@@ -1925,6 +1938,9 @@ fn run_auth_command_with_secrets(
     secrets: &Secrets,
 ) -> Result<()> {
     match command {
+        AuthCommand::XaiDevice => {
+            bail!("xAI device authentication must be delegated to codewhale-tui")
+        }
         AuthCommand::Status { provider } => {
             match provider {
                 Some(p) => {
@@ -3799,6 +3815,14 @@ mod tests {
 
     #[test]
     fn parses_auth_subcommand_matrix() {
+        let cli = parse_ok(&["deepseek", "auth", "xai-device"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Auth(AuthArgs {
+                command: AuthCommand::XaiDevice
+            }))
+        ));
+
         let cli = parse_ok(&["deepseek", "auth", "set", "--provider", "deepseek"]);
         assert!(matches!(
             cli.command,

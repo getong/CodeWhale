@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaults when Models.dev has no rows.
 
 ### Added
+- Wire xAI device-code OAuth into `codewhale auth xai-device`, the TUI
+  `/auth xai-device` command, and guided provider setup, with comment-preserving
+  auth-mode persistence and loopback exchange coverage (#4257).
 - Add GPT-5.6 Sol, Terra, and Luna to the OpenAI API route, including their
   1.05M context metadata, 128K output limits, pricing, and `max` reasoning
   effort. Add Meta Model API as a first-class OpenAI-compatible provider for

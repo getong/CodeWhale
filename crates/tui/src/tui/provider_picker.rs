@@ -968,11 +968,33 @@ fn auth_status_for(
             ProviderAuthStatus::OAuthMissing
         };
     }
+    if provider == ApiProvider::Xai
+        && let Some(status) = xai_oauth_status(configured, crate::xai_oauth::credentials_present())
+    {
+        return status;
+    }
     if has_key {
         ProviderAuthStatus::Configured
     } else {
         ProviderAuthStatus::Missing
     }
+}
+
+fn xai_oauth_status(
+    configured: Option<&crate::config::ProviderConfig>,
+    credentials_present: bool,
+) -> Option<ProviderAuthStatus> {
+    let oauth_selected = configured
+        .and_then(|entry| entry.auth_mode.as_deref())
+        .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth);
+    if !oauth_selected && !credentials_present {
+        return None;
+    }
+    Some(if credentials_present {
+        ProviderAuthStatus::OAuthReady
+    } else {
+        ProviderAuthStatus::OAuthMissing
+    })
 }
 
 fn has_explicit_credential(
@@ -1867,9 +1889,11 @@ impl ProviderPickerView {
     fn render_key_entry(&self, area: Rect, buf: &mut Buffer) {
         let row = &self.rows[self.selected_idx];
         let codex_oauth = row.provider == ApiProvider::OpenaiCodex;
+        let xai_oauth = row.provider == ApiProvider::Xai;
+        let oauth_provider = codex_oauth || xai_oauth;
         let outer = Block::default()
             .title(Line::from(Span::styled(
-                if codex_oauth {
+                if oauth_provider {
                     format!(" OAuth login — {} ", row.display_name)
                 } else {
                     format!(" API key — {} ", row.display_name)
@@ -1888,6 +1912,15 @@ impl ProviderPickerView {
         // at narrow widths (#3732); the key-entry fields render above it.
         let content = if codex_oauth {
             render_modal_footer(inner, buf, &[ActionHint::new("Esc", "back")])
+        } else if xai_oauth {
+            render_modal_footer(
+                inner,
+                buf,
+                &[
+                    ActionHint::new("Enter", "device login"),
+                    ActionHint::new("Esc", "back"),
+                ],
+            )
         } else {
             render_modal_footer(
                 inner,
@@ -1902,6 +1935,8 @@ impl ProviderPickerView {
         let masked = mask_key(&self.api_key_input);
         let display = if codex_oauth {
             "(run codex login; no token is stored here)".to_string()
+        } else if xai_oauth {
+            "(browser/device-code sign-in; tokens stay in ~/.grok/auth.json)".to_string()
         } else if masked.is_empty() {
             "(paste key here)".to_string()
         } else {
@@ -1909,7 +1944,7 @@ impl ProviderPickerView {
         };
         let key_lines = vec![Line::from(vec![
             Span::styled(
-                if codex_oauth { "Auth: " } else { "Key: " },
+                if oauth_provider { "Auth: " } else { "Key: " },
                 Style::default().fg(palette::TEXT_MUTED),
             ),
             Span::styled(
@@ -1932,6 +1967,11 @@ impl ProviderPickerView {
                 ),
                 Style::default().fg(palette::TEXT_MUTED),
             ))]
+        } else if xai_oauth {
+            vec![Line::from(Span::styled(
+                "Press Enter for xAI device login, or use XAI_API_KEY and re-open this picker.",
+                Style::default().fg(palette::TEXT_MUTED),
+            ))]
         } else {
             vec![Line::from(Span::styled(
                 format!(
@@ -1941,7 +1981,7 @@ impl ProviderPickerView {
                 Style::default().fg(palette::TEXT_MUTED),
             ))]
         };
-        if !codex_oauth && let Some(url) = row.provider.credential_url() {
+        if !oauth_provider && let Some(url) = row.provider.credential_url() {
             hint_lines.push(Line::from(Span::styled(
                 format!("Credentials: {url}"),
                 Style::default().fg(palette::TEXT_MUTED),
@@ -2270,7 +2310,10 @@ impl ModalView for ProviderPickerView {
     fn handle_paste(&mut self, text: &str) -> bool {
         match self.stage {
             Stage::KeyEntry => {
-                if self.selected_provider() == ApiProvider::OpenaiCodex {
+                if matches!(
+                    self.selected_provider(),
+                    ApiProvider::OpenaiCodex | ApiProvider::Xai
+                ) {
                     return true;
                 }
                 let sanitized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -2408,14 +2451,20 @@ impl ModalView for ProviderPickerView {
                     ViewAction::None
                 }
                 KeyCode::Backspace => {
-                    if self.selected_provider() != ApiProvider::OpenaiCodex {
+                    if !matches!(
+                        self.selected_provider(),
+                        ApiProvider::OpenaiCodex | ApiProvider::Xai
+                    ) {
                         self.api_key_input.pop();
                         self.key_entry_error = None;
                     }
                     ViewAction::None
                 }
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if self.selected_provider() != ApiProvider::OpenaiCodex {
+                    if !matches!(
+                        self.selected_provider(),
+                        ApiProvider::OpenaiCodex | ApiProvider::Xai
+                    ) {
                         self.api_key_input.pop();
                         self.key_entry_error = None;
                     }
@@ -2424,6 +2473,11 @@ impl ModalView for ProviderPickerView {
                 KeyCode::Enter => {
                     if self.selected_provider() == ApiProvider::OpenaiCodex {
                         return ViewAction::None;
+                    }
+                    if self.selected_provider() == ApiProvider::Xai {
+                        return ViewAction::EmitAndClose(
+                            ViewEvent::ProviderPickerXaiOAuthRequested,
+                        );
                     }
                     let key = self.api_key_input.trim().to_string();
                     if key.is_empty() {
@@ -2440,7 +2494,10 @@ impl ModalView for ProviderPickerView {
                     }
                 }
                 KeyCode::Char(c) => {
-                    if self.selected_provider() == ApiProvider::OpenaiCodex {
+                    if matches!(
+                        self.selected_provider(),
+                        ApiProvider::OpenaiCodex | ApiProvider::Xai
+                    ) {
                         return ViewAction::None;
                     }
                     // Reject ASCII whitespace so a stray space/tab doesn't slip
@@ -4228,6 +4285,53 @@ mod tests {
             picker.handle_key(key(KeyCode::Enter)),
             ViewAction::None
         ));
+    }
+
+    #[test]
+    fn xai_key_entry_launches_device_oauth() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new_for_missing_auth(
+            ApiProvider::Deepseek,
+            ApiProvider::Xai,
+            &config,
+            None,
+        )
+        .expect("xAI has a picker row");
+        assert_eq!(picker.stage, Stage::KeyEntry);
+
+        let rendered = render_text(&picker, 96, 20);
+        assert!(rendered.contains("OAuth login"));
+        assert!(rendered.contains("device login"));
+        assert!(rendered.contains("~/.grok/auth.json"));
+        assert!(!rendered.contains("(paste key here)"));
+
+        assert!(picker.handle_paste("xai-token"));
+        assert!(picker.api_key_input.is_empty());
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Enter)),
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerXaiOAuthRequested)
+        ));
+    }
+
+    #[test]
+    fn xai_auth_status_distinguishes_oauth_from_api_key_auth() {
+        let oauth_config = crate::config::ProviderConfig {
+            auth_mode: Some("oauth".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            xai_oauth_status(Some(&oauth_config), false),
+            Some(ProviderAuthStatus::OAuthMissing)
+        );
+        assert_eq!(
+            xai_oauth_status(Some(&oauth_config), true),
+            Some(ProviderAuthStatus::OAuthReady)
+        );
+        assert_eq!(
+            xai_oauth_status(None, true),
+            Some(ProviderAuthStatus::OAuthReady)
+        );
+        assert_eq!(xai_oauth_status(None, false), None);
     }
 
     #[test]

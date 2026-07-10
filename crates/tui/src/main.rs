@@ -265,6 +265,8 @@ enum Commands {
     },
     /// Remove the saved API key
     Logout,
+    /// Manage provider authentication flows.
+    Auth(TuiAuthArgs),
     /// List available models from the configured API endpoint
     Models(ModelsArgs),
     /// Generate speech audio with Xiaomi MiMo TTS models
@@ -401,6 +403,19 @@ enum ExecOutputFormat {
     Text,
     #[value(name = "stream-json")]
     StreamJson,
+}
+
+#[derive(Args, Debug, Clone)]
+struct TuiAuthArgs {
+    #[command(subcommand)]
+    command: TuiAuthCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum TuiAuthCommand {
+    /// Sign in to xAI/Grok with an SSH-friendly device code.
+    #[command(name = "xai-device")]
+    XaiDevice,
 }
 
 const CODEWHALE_TOOL_SURFACE_ENV: &str = "CODEWHALE_TOOL_SURFACE";
@@ -1274,6 +1289,9 @@ async fn main() -> Result<()> {
             Commands::Init => init_project(),
             Commands::Login { api_key } => run_login(api_key),
             Commands::Logout => run_logout(),
+            Commands::Auth(args) => match args.command {
+                TuiAuthCommand::XaiDevice => run_xai_device_auth(cli.config.as_deref()),
+            },
             Commands::Models(args) => {
                 let config = load_config_from_cli(&cli)?;
                 run_models(&config, args).await
@@ -5441,6 +5459,17 @@ fn run_logout() -> Result<()> {
     Ok(())
 }
 
+fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
+    let _credentials = xai_oauth::device_code_login()?;
+    let saved =
+        config::save_provider_auth_mode_for_at(config::ApiProvider::Xai, "oauth", config_path)?;
+    println!(
+        "xAI OAuth is ready; saved [providers.xai] auth_mode = \"oauth\" to {}",
+        saved.display()
+    );
+    Ok(())
+}
+
 fn resolve_session_id(session_id: Option<String>, last: bool, workspace: &Path) -> Result<String> {
     if last {
         return latest_session_id_for_workspace(workspace)?.ok_or_else(|| {
@@ -9284,6 +9313,17 @@ mod terminal_mode_tests {
     #[test]
     fn companion_binary_reports_its_own_name() {
         assert_eq!(Cli::command().get_name(), "codewhale-tui");
+    }
+
+    #[test]
+    fn xai_device_auth_subcommand_parses() {
+        let cli = parse_cli(&["codewhale-tui", "auth", "xai-device"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Auth(TuiAuthArgs {
+                command: TuiAuthCommand::XaiDevice
+            }))
+        ));
     }
 
     #[test]

@@ -444,6 +444,17 @@ mod tests {
     }
 
     #[test]
+    fn xai_device_auth_slash_command_starts_login() {
+        let mut app = create_test_app();
+        let result = execute("/auth xai-device", &mut app);
+        assert!(!result.is_error);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::StartXaiDeviceLogin)
+        ));
+    }
+
+    #[test]
     fn rlm_slash_command_routes_to_persistent_tool_instruction() {
         let mut app = create_test_app();
         let result = execute("/rlm 2 inspect this long corpus", &mut app);
@@ -644,9 +655,9 @@ mod tests {
                 has_config = true;
                 assert_eq!(
                     commands.len(),
-                    11,
+                    12,
                     "config group (group-local metadata exception) expected \
-                     exactly 11 commands, got {}",
+                     exactly 12 commands, got {}",
                     commands.len()
                 );
             }

@@ -6306,6 +6306,8 @@ pub enum AppAction {
     OpenProviderSetup {
         provider: Option<ApiProvider>,
     },
+    /// Run the xAI/Grok device-code flow with the TUI temporarily suspended.
+    StartXaiDeviceLogin,
     /// Open the `/mode` picker modal for Act / Plan / Operate.
     OpenModePicker,
     /// Refresh the engine prompt after the UI operating mode changes.

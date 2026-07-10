@@ -6370,6 +6370,12 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         // login on disk.
         return crate::oauth::auth_file_path().exists();
     }
+    if provider == ApiProvider::Xai && crate::xai_oauth::credentials_present() {
+        // xAI supports both API keys and OAuth. A Grok-compatible token file is
+        // sufficient, but its absence must fall through to the ordinary API-key
+        // checks below instead of masking a configured key.
+        return true;
+    }
 
     // Self-hosted providers typically run without authentication.
     if provider.is_self_hosted() {
@@ -6557,41 +6563,26 @@ pub fn save_provider_model_for(provider: ApiProvider, model: &str) -> Result<Pat
     Ok(config_path)
 }
 
-pub fn save_provider_auth_mode_for(provider: ApiProvider, auth_mode: &str) -> Result<PathBuf> {
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
-    ensure_parent_dir(&config_path)?;
-
-    let mut doc: toml::Value = if config_path.exists() {
-        let raw = fs::read_to_string(&config_path)?;
-        toml::from_str(&raw)
-            .with_context(|| format!("Failed to parse config at {}", config_path.display()))?
-    } else {
-        toml::Value::Table(toml::value::Table::new())
+pub fn save_provider_auth_mode_for_at(
+    provider: ApiProvider,
+    auth_mode: &str,
+    config_path: Option<&Path>,
+) -> Result<PathBuf> {
+    let config_path = match config_path {
+        Some(path) => path.to_path_buf(),
+        None => default_config_path()
+            .context("Failed to resolve config path: home directory not found.")?,
     };
-
-    let table = doc
-        .as_table_mut()
-        .context("Config root must be a TOML table.")?;
-    let providers = table
-        .entry("providers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .context("`providers` must be a table.")?;
+    ensure_parent_dir(&config_path)?;
     let key_inside = provider_config_key(provider).context("provider auth mode key")?;
-    let entry = providers
-        .entry(key_inside.to_string())
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .with_context(|| format!("`providers.{key_inside}` must be a table."))?;
-    entry.insert(
-        "auth_mode".to_string(),
-        toml::Value::String(auth_mode.to_string()),
-    );
-
-    let serialized = toml::to_string_pretty(&doc).context("failed to serialize updated config")?;
-    write_config_file_secure(&config_path, &serialized)
-        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::set_document_value(
+            doc,
+            &["providers", key_inside, "auth_mode"],
+            auth_mode,
+        )
+    })
+    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
     log_sensitive_event(
         "credential.auth_mode.set",
         json!({

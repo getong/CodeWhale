@@ -151,6 +151,7 @@
     "CmdNoteDescription": "Adicionar, listar, editar ou remover notas do workspace",
     "CmdThemeDescription": "Alternar tema: escuro, claro, tons de cinza ou sistema",
     "CmdProviderDescription": "Trocar ou exibir o backend LLM ativo (deepseek | nvidia-nim | ollama)",
+    "CmdAuthDescription": "Gerenciar fluxos de autenticação de provedores",
     "CmdQueueDescription": "Ver ou editar mensagens enfileiradas",
     "CmdQueueUsage": "Uso: /queue [list|send <n>|edit <n>|drop <n>|clear]",
     "CmdQueueDraftHeader": "Editando mensagem enfileirada:",

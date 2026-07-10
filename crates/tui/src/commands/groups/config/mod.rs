@@ -18,6 +18,7 @@ impl CommandGroup for ConfigCommands {
     fn commands(&self) -> &'static [Box<dyn Command>] {
         cached_command_list!(vec![
             Box::new(FunctionCommand::new(&CONFIG_INFO, run_config)),
+            Box::new(FunctionCommand::new(&AUTH_INFO, run_auth)),
             Box::new(FunctionCommand::new(&SIDEBAR_INFO, run_sidebar)),
             Box::new(FunctionCommand::new(&SETTINGS_INFO, run_settings)),
             Box::new(FunctionCommand::new(&STATUS_INFO, run_status)),
@@ -39,6 +40,12 @@ static CONFIG_INFO: CommandInfo = CommandInfo {
     aliases: &["experiments", "experimental"],
     usage: "/config [ask-rules|status|<key> [value]]",
     description_id: MessageId::CmdConfigDescription,
+};
+static AUTH_INFO: CommandInfo = CommandInfo {
+    name: "auth",
+    aliases: &[],
+    usage: "/auth xai-device",
+    description_id: MessageId::CmdAuthDescription,
 };
 static SIDEBAR_INFO: CommandInfo = CommandInfo {
     name: "sidebar",
@@ -108,6 +115,9 @@ fn run_registered(app: &mut App, name: &str, arg: Option<&str>) -> CommandResult
 fn run_config(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "config", arg)
 }
+fn run_auth(app: &mut App, arg: Option<&str>) -> CommandResult {
+    run_registered(app, "auth", arg)
+}
 fn run_sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "sidebar", arg)
 }
@@ -146,6 +156,12 @@ pub(in crate::commands) fn dispatch(
 ) -> Option<CommandResult> {
     let result = match command {
         "config" | "experiments" | "experimental" => config::config_command(app, arg),
+        "auth" => match arg.map(str::trim) {
+            Some("xai-device") | Some("xai_device") => {
+                CommandResult::action(crate::tui::app::AppAction::StartXaiDeviceLogin)
+            }
+            _ => CommandResult::error("Usage: /auth xai-device"),
+        },
         "sidebar" => config::sidebar(app, arg),
         "settings" => config::show_settings(app),
         "status" => status::status(app),

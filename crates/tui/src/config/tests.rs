@@ -6517,6 +6517,36 @@ fn has_api_key_for_accepts_provider_auth_source_metadata() {
 }
 
 #[test]
+fn has_api_key_for_accepts_xai_oauth_without_masking_api_keys() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-xai-auth-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let auth_path = temp_root.join("auth.json");
+    let _auth_path = EnvVarGuard::set("GROK_AUTH_PATH", auth_path.as_os_str());
+
+    let mut providers = ProvidersConfig::default();
+    providers.xai.api_key = Some("xai-api-key".to_string());
+    let api_key_config = Config {
+        providers: Some(providers),
+        ..Config::default()
+    };
+    assert!(has_api_key_for(&api_key_config, ApiProvider::Xai));
+
+    fs::write(&auth_path, "{}")?;
+    assert!(has_api_key_for(&Config::default(), ApiProvider::Xai));
+    fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[test]
 fn has_api_key_for_uses_root_config_key_for_deepseek_variants() {
     let config = Config {
         api_key: Some("root-config-key".to_string()),
@@ -7653,4 +7683,24 @@ fn custom_provider_base_url_and_model_resolve_from_named_table() {
     assert_eq!(config.api_provider(), ApiProvider::Custom);
     assert_eq!(config.deepseek_base_url(), "https://api.example.com/v1");
     assert_eq!(config.default_model(), "custom-model-v1");
+}
+
+#[test]
+fn provider_auth_mode_save_uses_requested_path_and_preserves_comments() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "# keep this operator note\n[providers.xai]\nmodel = \"grok-code-fast-1\" # keep model note\n",
+    )
+    .expect("seed config");
+
+    let saved = save_provider_auth_mode_for_at(ApiProvider::Xai, "oauth", Some(&path))
+        .expect("save auth mode");
+
+    assert_eq!(saved, path);
+    let contents = std::fs::read_to_string(&saved).expect("read config");
+    assert!(contents.contains("# keep this operator note"));
+    assert!(contents.contains("model = \"grok-code-fast-1\" # keep model note"));
+    assert!(contents.contains("auth_mode = \"oauth\""));
 }

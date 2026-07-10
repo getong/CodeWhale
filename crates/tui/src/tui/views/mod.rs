@@ -629,6 +629,8 @@ pub enum ViewEvent {
     ProviderPickerKimiOAuthEnabled {
         provider: crate::config::ApiProvider,
     },
+    /// Emitted by provider/setup UI when xAI device-code OAuth is requested.
+    ProviderPickerXaiOAuthRequested,
     /// Emitted by the `/provider` picker (the `M` action) to jump straight to
     /// the `/model` picker pre-filtered to the highlighted provider (#3083).
     ProviderPickerOpenModels {

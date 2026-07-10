@@ -1,4 +1,5 @@
 {
+    "CmdAuthDescription": "管理提供者驗證流程",
     "CmdRelayDescription": "為新執行緒建立會話接力摘要",
     "CmdHotbarDescription": "開啟 Hotbar 設定",
     "KbJumpPlanAgentYolo": "觸發 Hotbar 槽位",
