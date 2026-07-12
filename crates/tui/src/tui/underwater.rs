@@ -150,7 +150,11 @@ fn permission_label(app: &App) -> &'static str {
         match app.approval_mode.permission_chip_label() {
             "Ask" => "ask",
             "Auto-Review" => "auto",
-            "Full Access" => "bypass",
+            // Keep the effective permission explicit. `bypass` is an
+            // implementation detail and, more importantly, can imply that
+            // repository law no longer applies. Full Access never bypasses
+            // constitution rules.
+            "Full Access" => "Full Access",
             "Never" => "never",
             _ => "ask",
         }
@@ -342,6 +346,22 @@ pub fn render_footer(area: Rect, buf: &mut Buffer, app: &App) {
             },
         ),
     )];
+    if tier != ShellTier::Compact
+        && let Some(status) = app
+            .status_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|status| !status.is_empty() && *status != phase.label())
+    {
+        left.push(Span::styled(
+            " · ",
+            Style::default().fg(app.ui_theme.text_dim),
+        ));
+        left.push(Span::styled(
+            truncate_to_width(status, 40),
+            Style::default().fg(app.ui_theme.text_muted),
+        ));
+    }
     let cost = app.displayed_session_cost_for_currency(app.cost_currency);
     if cost > 0.000_001 && tier != ShellTier::Compact {
         left.push(Span::styled(

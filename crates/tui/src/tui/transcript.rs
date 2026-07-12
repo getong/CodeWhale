@@ -271,7 +271,11 @@ impl TranscriptViewCache {
             let mut copy_separators = Vec::with_capacity(rendered.len());
             let mut copy_prefix_widths = Vec::with_capacity(rendered.len());
             for rendered_line in rendered {
-                lines.push(rendered_line.line);
+                let mut line = rendered_line.line;
+                if is_tool_groupable {
+                    strip_cell_local_tool_rail(&mut line);
+                }
+                lines.push(line);
                 copy_prefix_widths.push(rendered_line.copy_prefix_width);
                 copy_separators.push(rendered_line.copy_separator_after);
             }
@@ -424,6 +428,21 @@ impl TranscriptViewCache {
             .get(line_index)
             .copied()
             .unwrap_or(0)
+    }
+}
+
+/// Tool cells still render their own rail when used outside the transcript
+/// cache (pager, clipboard, focused detail). Inside the live transcript this
+/// cache owns grouping across adjacent cells, so retaining both rails produces
+/// doubled prefixes such as `╭ ╭`. Replace the cell-local decoration with the
+/// group rail added by `line_with_group_rail` during flattening.
+fn strip_cell_local_tool_rail(line: &mut Line<'static>) {
+    if line
+        .spans
+        .first()
+        .is_some_and(|span| matches!(span.content.as_ref(), "─ " | "╭ " | "│ " | "╰ "))
+    {
+        line.spans.remove(0);
     }
 }
 
