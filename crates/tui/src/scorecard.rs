@@ -11,15 +11,22 @@
 //! scorecard, reusing the existing pricing layer rather than reinventing cost
 //! math. The `scorecard` subcommand is a thin I/O wrapper over this module.
 
+use codewhale_config::pricing::{Currency, OfferingPricing, TokenUsage};
 use serde::{Deserialize, Serialize};
 
+use crate::config::ApiProvider;
 use crate::models::Usage;
-use crate::pricing::{calculate_turn_cost_estimate_from_usage, token_usage_for_pricing};
+use crate::pricing::{calculate_turn_cost_estimate_for_provider, token_usage_for_pricing};
+use crate::provider_lake::catalog_offering_for_model;
 
 /// One turn's normalized token economics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnScore {
     pub turn_id: String,
+    /// Effective provider recorded for this turn. `None` means legacy or
+    /// otherwise unknown provenance, so cost must remain unpriced.
+    #[serde(default)]
+    pub provider: Option<String>,
     pub model: String,
     /// Non-cached (billable) input tokens.
     pub input_tokens: u64,
@@ -29,15 +36,37 @@ pub struct TurnScore {
     pub cache_read_tokens: u64,
     pub cost_usd: f64,
     pub cost_cny: f64,
-    /// True when no pricing row exists for `model`: cost is reported as 0 but is
-    /// not meaningful, so the summary can flag it rather than imply "$0.00".
+    /// True when provider provenance is missing/unknown or no authoritative USD
+    /// pricing row exists: numeric cost stays 0 for compatibility, while this
+    /// flag prevents it from being represented as a real zero-dollar charge.
     pub cost_unpriced: bool,
+    /// Same availability marker for CNY. Most catalog offerings publish only
+    /// USD, so their CNY value is unavailable rather than a real zero.
+    #[serde(default)]
+    pub cost_cny_unpriced: bool,
 }
 
 /// Aggregate metrics for a run. Serializes/deserializes as the baseline file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ScorecardMetrics {
     pub turns: usize,
+    /// Turns whose provider/model route could not be priced authoritatively in
+    /// USD.
+    /// Defaults to zero so existing baseline JSON remains readable.
+    #[serde(default)]
+    pub unpriced_turns: usize,
+    /// Turns without authoritative CNY pricing.
+    #[serde(default)]
+    pub cny_unpriced_turns: usize,
+    /// Whether every turn contributed authoritative USD pricing. Legacy
+    /// baselines lack this field and therefore default to `false`, preventing
+    /// comparisons against totals that may have been inferred from model ids
+    /// alone.
+    #[serde(default)]
+    pub cost_complete: bool,
+    /// Whether every turn contributed authoritative CNY pricing.
+    #[serde(default)]
+    pub cny_cost_complete: bool,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cache_read_tokens: u64,
@@ -69,19 +98,75 @@ pub struct Scorecard {
 /// the turn's recorded usage.
 pub struct TurnInput<'a> {
     pub turn_id: String,
+    pub provider: Option<&'a str>,
     pub model: String,
     pub usage: &'a Usage,
 }
 
 /// A recorded turn as read from a scorecard input file (a JSON array of these).
-/// Matches the per-turn data the `TurnEnd` hook already emits (`model` + `usage`),
-/// so a run's turns can be captured and scored offline.
+/// The base shape matches the per-turn data a `TurnEnd` hook emits. Recorders
+/// and persisted runtime exports can add `provider` / `effective_provider`;
+/// legacy model-only recordings remain readable but deliberately unpriced.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecordedTurn {
     #[serde(default)]
     pub turn_id: String,
+    #[serde(default, alias = "effective_provider")]
+    pub provider: Option<String>,
     pub model: String,
     pub usage: Usage,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AvailableCost {
+    usd: Option<f64>,
+    cny: Option<f64>,
+}
+
+fn provider_scoped_cost(
+    provider: ApiProvider,
+    model: &str,
+    usage: &Usage,
+    token_usage: &TokenUsage,
+) -> AvailableCost {
+    let Some(offering) = catalog_offering_for_model(provider, model) else {
+        return AvailableCost::default();
+    };
+
+    // Direct DeepSeek routes retain the repository's hand-sourced, time-aware
+    // USD+CNY table. Requiring an exact provider offering first prevents a
+    // foreign wire id from matching merely because its text contains
+    // "deepseek".
+    if matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+    ) {
+        return calculate_turn_cost_estimate_for_provider(provider, model, usage).map_or_else(
+            AvailableCost::default,
+            |cost| AvailableCost {
+                usd: Some(cost.usd),
+                cny: Some(cost.cny),
+            },
+        );
+    }
+
+    let Some(pricing) = OfferingPricing::from_catalog_offering(&offering) else {
+        return AvailableCost::default();
+    };
+    let Some(amount) = pricing.estimate_cost(token_usage) else {
+        return AvailableCost::default();
+    };
+    match &pricing.currency {
+        Currency::Usd => AvailableCost {
+            usd: Some(amount),
+            cny: None,
+        },
+        Currency::Cny => AvailableCost {
+            usd: None,
+            cny: Some(amount),
+        },
+        Currency::Other(_) => AvailableCost::default(),
+    }
 }
 
 impl Scorecard {
@@ -95,13 +180,23 @@ impl Scorecard {
         for turn in turns {
             // Normalize provider usage into canonical billable classes once.
             let classes = token_usage_for_pricing(turn.usage);
-            let cost = calculate_turn_cost_estimate_from_usage(&turn.model, turn.usage);
-            let (cost_usd, cost_cny, cost_unpriced) = match cost {
-                Some(c) => (c.usd, c.cny, false),
-                None => (0.0, 0.0, true),
-            };
+            let provider = turn
+                .provider
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let cost = provider
+                .and_then(ApiProvider::parse)
+                .map_or_else(AvailableCost::default, |provider| {
+                    provider_scoped_cost(provider, &turn.model, turn.usage, &classes)
+                });
+            let cost_unpriced = cost.usd.is_none();
+            let cost_cny_unpriced = cost.cny.is_none();
+            let cost_usd = cost.usd.unwrap_or(0.0);
+            let cost_cny = cost.cny.unwrap_or(0.0);
 
             metrics.turns += 1;
+            metrics.unpriced_turns += usize::from(cost_unpriced);
+            metrics.cny_unpriced_turns += usize::from(cost_cny_unpriced);
             metrics.total_input_tokens += classes.input;
             metrics.total_output_tokens += classes.output;
             metrics.total_cache_read_tokens += classes.cache_read;
@@ -110,6 +205,7 @@ impl Scorecard {
 
             per_turn.push(TurnScore {
                 turn_id: turn.turn_id.clone(),
+                provider: provider.map(str::to_string),
                 model: turn.model.clone(),
                 input_tokens: classes.input,
                 output_tokens: classes.output,
@@ -117,6 +213,7 @@ impl Scorecard {
                 cost_usd,
                 cost_cny,
                 cost_unpriced,
+                cost_cny_unpriced,
             });
         }
 
@@ -126,6 +223,8 @@ impl Scorecard {
         } else {
             0.0
         };
+        metrics.cost_complete = metrics.unpriced_turns == 0;
+        metrics.cny_cost_complete = metrics.cny_unpriced_turns == 0;
 
         Self { per_turn, metrics }
     }
@@ -134,7 +233,6 @@ impl Scorecard {
     #[must_use]
     pub fn to_summary(&self) -> String {
         let m = &self.metrics;
-        let unpriced = self.per_turn.iter().filter(|t| t.cost_unpriced).count();
         let mut out = String::new();
         out.push_str("Token / cache / cost scorecard\n");
         out.push_str(&format!("turns: {}\n", m.turns));
@@ -146,16 +244,55 @@ impl Scorecard {
             "cache_hit_ratio: {:.1}%\n",
             m.cache_hit_ratio * 100.0
         ));
-        out.push_str(&format!(
-            "cost_usd: ${:.4}  cost_cny: ¥{:.4}\n",
-            m.total_cost_usd, m.total_cost_cny
-        ));
-        if unpriced > 0 {
+        append_currency_summary(
+            &mut out,
+            "cost_usd",
+            "priced_cost_subtotal_usd",
+            "$",
+            m.total_cost_usd,
+            m.unpriced_turns,
+            m.turns,
+        );
+        append_currency_summary(
+            &mut out,
+            "cost_cny",
+            "priced_cost_subtotal_cny",
+            "¥",
+            m.total_cost_cny,
+            m.cny_unpriced_turns,
+            m.turns,
+        );
+        if m.unpriced_turns > 0 {
             out.push_str(&format!(
-                "note: {unpriced} turn(s) had no pricing row; their cost is excluded.\n"
+                "note: {} turn(s) had missing/unknown provider provenance or no authoritative USD pricing row; their USD cost is unavailable and excluded.\n",
+                m.unpriced_turns
+            ));
+        }
+        if m.cny_unpriced_turns > 0 {
+            out.push_str(&format!(
+                "note: {} turn(s) had no authoritative CNY pricing row; their CNY cost is unavailable and excluded.\n",
+                m.cny_unpriced_turns
             ));
         }
         out
+    }
+}
+
+fn append_currency_summary(
+    out: &mut String,
+    complete_label: &str,
+    subtotal_label: &str,
+    symbol: &str,
+    total: f64,
+    unpriced_turns: usize,
+    turns: usize,
+) {
+    if unpriced_turns == 0 {
+        out.push_str(&format!("{complete_label}: {symbol}{total:.4}\n"));
+    } else if unpriced_turns == turns {
+        out.push_str(&format!("{complete_label}: unavailable\n"));
+    } else {
+        out.push_str(&format!("{subtotal_label}: {symbol}{total:.4}\n"));
     }
 }
 
@@ -170,13 +307,16 @@ impl ScorecardMetrics {
         threshold_pct: f64,
     ) -> Vec<Regression> {
         let mut out = Vec::new();
-        push_regression(
-            &mut out,
-            "total_cost_usd",
-            baseline.total_cost_usd,
-            self.total_cost_usd,
-            threshold_pct,
-        );
+        // A partial/unknown subtotal is not comparable to a complete baseline.
+        if self.cost_complete && baseline.cost_complete {
+            push_regression(
+                &mut out,
+                "total_cost_usd",
+                baseline.total_cost_usd,
+                self.total_cost_usd,
+                threshold_pct,
+            );
+        }
         push_regression(
             &mut out,
             "total_input_tokens",
@@ -259,11 +399,13 @@ mod tests {
         let turns = [
             TurnInput {
                 turn_id: "t1".into(),
+                provider: None,
                 model: "unpriced-x".into(),
                 usage: &u1,
             },
             TurnInput {
                 turn_id: "t2".into(),
+                provider: None,
                 model: "unpriced-x".into(),
                 usage: &u2,
             },
@@ -274,6 +416,7 @@ mod tests {
         assert_eq!(card.metrics.total_input_tokens, 800 + 1200);
         assert_eq!(card.metrics.total_output_tokens, 600); // 500 + 100
         assert_eq!(card.metrics.total_cache_read_tokens, 1000); // 200 + 800
+        assert_eq!(card.metrics.unpriced_turns, 2);
         // cache_read / (input + cache_read) = 1000 / (2000 + 1000)
         let expected = 1000.0 / 3000.0;
         assert!((card.metrics.cache_hit_ratio - expected).abs() < 1e-9);
@@ -284,6 +427,7 @@ mod tests {
         let u = usage(1000, 500, 0);
         let turns = [TurnInput {
             turn_id: "t1".into(),
+            provider: Some("openai"),
             model: "definitely-not-a-real-model".into(),
             usage: &u,
         }];
@@ -291,13 +435,189 @@ mod tests {
         assert!(card.per_turn[0].cost_unpriced);
         assert_eq!(card.per_turn[0].cost_usd, 0.0);
         assert_eq!(card.metrics.total_cost_usd, 0.0);
-        assert!(card.to_summary().contains("no pricing row"));
+        assert!(card.to_summary().contains("cost_usd: unavailable"));
+    }
+
+    #[test]
+    fn same_model_is_priced_only_for_its_authoritative_provider_route() {
+        let u = usage(1000, 500, 0);
+        let turns = [
+            TurnInput {
+                turn_id: "api".into(),
+                provider: Some("openai"),
+                model: "gpt-5.5".into(),
+                usage: &u,
+            },
+            TurnInput {
+                turn_id: "oauth".into(),
+                provider: Some("openai-codex"),
+                model: "gpt-5.5".into(),
+                usage: &u,
+            },
+            TurnInput {
+                turn_id: "local".into(),
+                provider: Some("ollama"),
+                model: "gpt-5.5".into(),
+                usage: &u,
+            },
+        ];
+
+        let card = Scorecard::from_turns(&turns);
+
+        assert!(!card.per_turn[0].cost_unpriced);
+        assert!(card.per_turn[0].cost_usd > 0.0);
+        assert!(card.per_turn[1].cost_unpriced);
+        assert_eq!(card.per_turn[1].cost_usd, 0.0);
+        assert!(card.per_turn[2].cost_unpriced);
+        assert_eq!(card.per_turn[2].cost_usd, 0.0);
+        assert_eq!(card.metrics.unpriced_turns, 2);
+        assert_eq!(card.metrics.cny_unpriced_turns, 3);
+        assert!(!card.metrics.cost_complete);
+        assert!(!card.metrics.cny_cost_complete);
+        assert!(card.to_summary().contains("priced_cost_subtotal_usd"));
+        assert!(card.to_summary().contains("cost_cny: unavailable"));
+
+        let json = serde_json::to_value(&card).expect("serialize scorecard");
+        assert_eq!(json["per_turn"][0]["provider"], "openai");
+        assert_eq!(json["per_turn"][1]["provider"], "openai-codex");
+        assert_eq!(json["per_turn"][2]["provider"], "ollama");
+        assert_eq!(json["metrics"]["unpriced_turns"], 2);
+        assert_eq!(json["metrics"]["cost_complete"], false);
+        assert_eq!(json["metrics"]["cny_cost_complete"], false);
+    }
+
+    #[test]
+    fn known_zero_usage_is_zero_cost_not_unavailable() {
+        let u = usage(0, 0, 0);
+        let turns = [TurnInput {
+            turn_id: "zero".into(),
+            provider: Some("openai"),
+            model: "gpt-5.5".into(),
+            usage: &u,
+        }];
+
+        let card = Scorecard::from_turns(&turns);
+
+        assert!(!card.per_turn[0].cost_unpriced);
+        assert_eq!(card.per_turn[0].cost_usd, 0.0);
+        assert!(card.per_turn[0].cost_cny_unpriced);
+        assert_eq!(card.metrics.unpriced_turns, 0);
+        assert_eq!(card.metrics.cny_unpriced_turns, 1);
+        assert!(card.metrics.cost_complete);
+        assert!(!card.metrics.cny_cost_complete);
+        assert!(card.to_summary().contains("cost_usd: $0.0000"));
+        assert!(card.to_summary().contains("cost_cny: unavailable"));
+    }
+
+    #[test]
+    fn direct_deepseek_route_keeps_authoritative_dual_currency_pricing() {
+        let u = usage(1000, 500, 0);
+        let turns = [TurnInput {
+            turn_id: "deepseek".into(),
+            provider: Some("deepseek"),
+            model: "deepseek-v4-pro".into(),
+            usage: &u,
+        }];
+
+        let card = Scorecard::from_turns(&turns);
+
+        assert!(!card.per_turn[0].cost_unpriced);
+        assert!(!card.per_turn[0].cost_cny_unpriced);
+        assert!(card.per_turn[0].cost_usd > 0.0);
+        assert!(card.per_turn[0].cost_cny > 0.0);
+        assert!(card.metrics.cost_complete);
+        assert!(card.metrics.cny_cost_complete);
+    }
+
+    #[test]
+    fn legacy_model_only_record_is_readable_but_unpriced() {
+        let recorded: RecordedTurn = serde_json::from_value(serde_json::json!({
+            "turn_id": "legacy",
+            "model": "gpt-5.5",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            }
+        }))
+        .expect("parse legacy scorecard turn");
+        assert_eq!(recorded.provider, None);
+
+        let turns = [TurnInput {
+            turn_id: recorded.turn_id.clone(),
+            provider: recorded.provider.as_deref(),
+            model: recorded.model.clone(),
+            usage: &recorded.usage,
+        }];
+        let card = Scorecard::from_turns(&turns);
+
+        assert!(card.per_turn[0].cost_unpriced);
+        assert_eq!(card.per_turn[0].cost_usd, 0.0);
+        assert_eq!(card.metrics.unpriced_turns, 1);
+        assert!(card.to_summary().contains("cost_usd: unavailable"));
+    }
+
+    #[test]
+    fn recorded_turn_accepts_effective_provider_alias() {
+        let recorded: RecordedTurn = serde_json::from_value(serde_json::json!({
+            "turn_id": "runtime",
+            "effective_provider": "openai-codex",
+            "model": "gpt-5.5",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        }))
+        .expect("parse runtime scorecard turn");
+
+        assert_eq!(recorded.provider.as_deref(), Some("openai-codex"));
+    }
+
+    #[test]
+    fn blank_unknown_and_custom_providers_fail_closed_as_unpriced() {
+        let u = usage(1000, 500, 0);
+        let turns = [
+            TurnInput {
+                turn_id: "blank".into(),
+                provider: Some("   "),
+                model: "gpt-5.5".into(),
+                usage: &u,
+            },
+            TurnInput {
+                turn_id: "named-custom".into(),
+                provider: Some("my-openai-proxy"),
+                model: "gpt-5.5".into(),
+                usage: &u,
+            },
+            TurnInput {
+                turn_id: "generic-custom".into(),
+                provider: Some("custom"),
+                model: "gpt-5.5".into(),
+                usage: &u,
+            },
+        ];
+
+        let card = Scorecard::from_turns(&turns);
+
+        assert_eq!(card.per_turn[0].provider, None);
+        assert_eq!(
+            card.per_turn[1].provider.as_deref(),
+            Some("my-openai-proxy")
+        );
+        assert_eq!(card.per_turn[2].provider.as_deref(), Some("custom"));
+        assert!(card.per_turn.iter().all(|turn| turn.cost_unpriced));
+        assert_eq!(card.metrics.unpriced_turns, 3);
+        assert!(!card.metrics.cost_complete);
+        assert!(card.to_summary().contains("cost_usd: unavailable"));
     }
 
     #[test]
     fn regression_flags_cost_and_token_increases_over_threshold() {
         let baseline = ScorecardMetrics {
             turns: 1,
+            unpriced_turns: 0,
+            cny_unpriced_turns: 0,
+            cost_complete: true,
+            cny_cost_complete: true,
             total_input_tokens: 1000,
             total_output_tokens: 1000,
             total_cache_read_tokens: 0,
@@ -317,6 +637,49 @@ mod tests {
         assert!(names.contains(&"total_cost_usd"));
         assert!(names.contains(&"total_output_tokens"));
         assert!(!names.contains(&"total_input_tokens")); // under threshold
+    }
+
+    #[test]
+    fn regression_skips_cost_when_either_scorecard_is_incomplete() {
+        let baseline = ScorecardMetrics {
+            cost_complete: true,
+            total_cost_usd: 0.10,
+            ..Default::default()
+        };
+        let current = ScorecardMetrics {
+            turns: 1,
+            unpriced_turns: 1,
+            total_cost_usd: 0.20,
+            ..Default::default()
+        };
+
+        let regs = current.regressions_against(&baseline, 5.0);
+        assert!(!regs.iter().any(|r| r.metric == "total_cost_usd"));
+    }
+
+    #[test]
+    fn legacy_baseline_is_readable_but_cost_is_not_comparable() {
+        let baseline: ScorecardMetrics = serde_json::from_value(serde_json::json!({
+            "turns": 1,
+            "total_input_tokens": 10,
+            "total_output_tokens": 5,
+            "total_cache_read_tokens": 0,
+            "total_cost_usd": 0.10,
+            "total_cost_cny": 0.0,
+            "cache_hit_ratio": 0.0
+        }))
+        .expect("parse legacy scorecard baseline");
+        assert!(!baseline.cost_complete);
+
+        let current = ScorecardMetrics {
+            cost_complete: true,
+            total_cost_usd: 0.20,
+            total_input_tokens: 10,
+            total_output_tokens: 5,
+            ..Default::default()
+        };
+        let regs = current.regressions_against(&baseline, 5.0);
+        assert!(!regs.iter().any(|r| r.metric == "total_cost_usd"));
     }
 
     #[test]

@@ -810,7 +810,9 @@ struct SessionDiagnosticsArgs {
 #[derive(Args, Debug, Clone)]
 struct ScorecardArgs {
     /// JSON file with the recorded turns to score: an array of
-    /// `{ "turn_id", "model", "usage": {…} }` (the shape the TurnEnd hook emits).
+    /// `{ "turn_id", "provider", "model", "usage": {…} }`. `provider` is
+    /// optional (and `effective_provider` is accepted as an alias); legacy rows
+    /// without provider remain readable but their cost is unavailable.
     #[arg(long, value_name = "FILE")]
     input: PathBuf,
     /// Optional baseline scorecard-metrics JSON to compare against. When set,
@@ -1675,6 +1677,7 @@ fn run_scorecard(args: ScorecardArgs) -> Result<()> {
         .iter()
         .map(|r| TurnInput {
             turn_id: r.turn_id.clone(),
+            provider: r.provider.as_deref(),
             model: r.model.clone(),
             usage: &r.usage,
         })
