@@ -80,6 +80,7 @@ pub mod user_input;
 pub mod views;
 pub mod vim_mode;
 pub mod widgets;
+pub mod work_surface;
 pub mod workspace_context;
 
 // === Re-exports ===

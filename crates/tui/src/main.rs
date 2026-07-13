@@ -88,6 +88,7 @@ mod request_tuning;
 mod resource_telemetry;
 mod retry_status;
 pub mod rlm;
+mod route_billing;
 mod route_budget;
 mod route_runtime;
 mod runtime_api;
@@ -8886,6 +8887,7 @@ mod doctor_legacy_state_tests {
 
     #[test]
     fn doctor_state_roots_ignore_ambient_legacy_home_when_codewhale_home_is_explicit() {
+        let _env_lock = crate::test_support::lock_test_env();
         let tmp = TempDir::new().expect("tempdir");
         let explicit_home = tmp.path().join("isolated-codewhale");
         let ambient_legacy = tmp.path().join(".deepseek");

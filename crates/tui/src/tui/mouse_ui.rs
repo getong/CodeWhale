@@ -236,13 +236,19 @@ fn handle_workflow_panel_mouse(app: &mut App, mouse: MouseEvent) -> bool {
         .as_ref()
         .is_some_and(|panel| panel.lifecycle.is_running());
 
-    if in_cancel_zone
-        && running
-        && let Some(run_id) = app.request_workflow_panel_cancel()
-    {
-        app.status_message = Some(format!(
-            "Cancelling workflow {run_id}… (dispatch via /workflow cancel {run_id})"
-        ));
+    if in_cancel_zone && running {
+        let run_id = app
+            .workflow_panel
+            .as_ref()
+            .map(|panel| panel.run_id.clone())
+            .expect("running panel has an id");
+        app.input = format!("/workflow cancel {run_id}");
+        app.cursor_position = app.input.chars().count();
+        app.status_message = Some(app.tr(MessageId::SidebarDestructiveArmed).into_owned());
+        if let Some(panel) = app.workflow_panel.as_mut() {
+            panel.keyboard_focus = false;
+        }
+        app.needs_redraw = true;
         return true;
     }
 
@@ -327,6 +333,17 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
     // Sidebar resize handle — check before composer so it doesn't compete
     // with text selection / scrolling.
     if handle_sidebar_resize_mouse(app, mouse) {
+        return Vec::new();
+    }
+
+    // Ocean work surface owns its rect, scrolling, focus, and row actions.
+    // Route it before workflow/composer/transcript so wheel events never leak
+    // into an unrelated viewport.
+    let work_surface = crate::tui::work_surface::handle_mouse(app, mouse);
+    if let Some(action) = work_surface.action {
+        return apply_sidebar_row_action(app, action);
+    }
+    if work_surface.consumed {
         return Vec::new();
     }
 
@@ -447,60 +464,7 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
             // falling through to transcript selection. Command rows still use
             // the command-palette pipeline; agent rows are direct UI actions.
             if let Some(action) = sidebar_click_action(app, mouse) {
-                match action {
-                    SidebarRowAction::Command(command) => {
-                        use crate::tui::views::CommandPaletteAction;
-                        return vec![ViewEvent::CommandPaletteSelected {
-                            action: CommandPaletteAction::ExecuteCommand { command },
-                        }];
-                    }
-                    SidebarRowAction::PrefillCommand(command) => {
-                        app.input = command;
-                        app.cursor_position = app.input.len();
-                        app.status_message =
-                            Some(app.tr(MessageId::SidebarDestructiveArmed).into_owned());
-                        app.needs_redraw = true;
-                        return Vec::new();
-                    }
-                    SidebarRowAction::ToggleAgentDetails { agent_id } => {
-                        if !app.expanded_sidebar_agents.insert(agent_id.clone()) {
-                            app.expanded_sidebar_agents.remove(&agent_id);
-                            app.status_message = Some("Agent details collapsed".to_string());
-                        } else {
-                            app.status_message = Some("Agent details expanded".to_string());
-                        }
-                        app.needs_redraw = true;
-                        return Vec::new();
-                    }
-                    SidebarRowAction::OpenAgentDetail { agent_id } => {
-                        // #2889 slice / dogfood A3: drill from the expanded
-                        // dossier into the child's transcript card (action
-                        // tree, status, summary) in the detail pager.
-                        let cell_index = app.history.iter().position(|cell| {
-                            matches!(
-                                cell,
-                                HistoryCell::SubAgent(
-                                    crate::tui::history::SubAgentCell::Delegate(card)
-                                ) if card.agent_id == agent_id
-                            )
-                        });
-                        match cell_index {
-                            Some(cell_index) => {
-                                open_details_pager_for_cell(app, cell_index);
-                            }
-                            None => {
-                                app.status_message = Some(format!(
-                                    "No transcript card for {agent_id} yet — use handle_read agent:{agent_id}/full_transcript"
-                                ));
-                            }
-                        }
-                        app.needs_redraw = true;
-                        return Vec::new();
-                    }
-                    SidebarRowAction::CancelAgent { agent_id } => {
-                        return vec![ViewEvent::SidebarAgentCancel { agent_id }];
-                    }
-                }
+                return apply_sidebar_row_action(app, action);
             }
 
             // Click on the transcript scrollbar gutter starts a scrollbar
@@ -629,6 +593,63 @@ fn sidebar_click_action(app: &App, mouse: MouseEvent) -> Option<SidebarRowAction
         }
     }
     None
+}
+
+pub(crate) fn apply_sidebar_row_action(app: &mut App, action: SidebarRowAction) -> Vec<ViewEvent> {
+    match action {
+        SidebarRowAction::Command(command) => {
+            use crate::tui::views::CommandPaletteAction;
+            vec![ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::ExecuteCommand { command },
+            }]
+        }
+        SidebarRowAction::PrefillCommand(command) => {
+            app.input = command;
+            app.cursor_position = app.input.len();
+            app.status_message = Some(app.tr(MessageId::SidebarDestructiveArmed).into_owned());
+            app.needs_redraw = true;
+            Vec::new()
+        }
+        SidebarRowAction::ToggleAgentDetails { agent_id } => {
+            if !app.expanded_sidebar_agents.insert(agent_id.clone()) {
+                app.expanded_sidebar_agents.remove(&agent_id);
+                app.status_message = Some("Agent details collapsed".to_string());
+            } else {
+                app.status_message = Some("Agent details expanded".to_string());
+            }
+            app.needs_redraw = true;
+            Vec::new()
+        }
+        SidebarRowAction::OpenAgentDetail { agent_id } => {
+            let cell_index = app.history.iter().position(|cell| {
+                matches!(
+                    cell,
+                    HistoryCell::SubAgent(crate::tui::history::SubAgentCell::Delegate(card))
+                        if card.agent_id == agent_id
+                )
+            });
+            match cell_index {
+                Some(cell_index) => {
+                    open_details_pager_for_cell(app, cell_index);
+                }
+                None => {
+                    app.status_message = Some(format!(
+                        "No transcript card for {agent_id} yet — use handle_read agent:{agent_id}/full_transcript"
+                    ));
+                }
+            }
+            app.needs_redraw = true;
+            Vec::new()
+        }
+        SidebarRowAction::CancelAgent { agent_id } => {
+            vec![ViewEvent::SidebarAgentCancel { agent_id }]
+        }
+        SidebarRowAction::InspectText { label, detail } => {
+            app.status_message = Some(format!("{label} · {detail}"));
+            app.needs_redraw = true;
+            Vec::new()
+        }
+    }
 }
 
 pub(crate) fn mouse_hits_transcript_scrollbar(app: &App, mouse: MouseEvent) -> bool {

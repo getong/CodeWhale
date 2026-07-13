@@ -597,6 +597,15 @@ fn cny_display_keeps_cny_when_costs_have_cny_rates() {
 }
 
 #[test]
+fn subscription_route_hides_stale_session_dollars_in_footer() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.accrue_session_cost_estimate(CostEstimate::usd_only(12.34));
+    app.billing_presentation =
+        crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota");
+    assert!(crate::tui::footer_ui::footer_cost_spans(&app).is_empty());
+}
+
+#[test]
 fn cny_cache_savings_falls_back_to_usd_for_usd_only_models() {
     let mut app = App::new(test_options(false), &Config::default());
     app.cost_currency = CostCurrency::Cny;
@@ -1614,17 +1623,14 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
         AppMode::CHOICES,
         [AppMode::Agent, AppMode::Plan, AppMode::Operate]
     );
-    assert_eq!(
-        AppMode::CYCLE,
-        [AppMode::Plan, AppMode::Agent, AppMode::Operate]
-    );
+    assert_eq!(AppMode::CYCLE, [AppMode::Plan, AppMode::Agent]);
 
     assert_eq!(AppMode::Plan.next(), AppMode::Agent);
-    assert_eq!(AppMode::Agent.next(), AppMode::Operate);
-    assert_eq!(AppMode::Operate.next(), AppMode::Plan);
+    assert_eq!(AppMode::Agent.next(), AppMode::Plan);
+    assert_eq!(AppMode::Operate.next(), AppMode::Agent);
     assert_eq!(AppMode::Auto.next(), AppMode::Agent);
     assert_eq!(AppMode::Yolo.next(), AppMode::Agent);
-    assert_eq!(AppMode::Plan.previous(), AppMode::Operate);
+    assert_eq!(AppMode::Plan.previous(), AppMode::Agent);
     assert_eq!(AppMode::Agent.previous(), AppMode::Plan);
     assert_eq!(AppMode::Operate.previous(), AppMode::Agent);
     assert_eq!(AppMode::Auto.previous(), AppMode::Agent);
@@ -1641,12 +1647,31 @@ fn test_cycle_mode_transitions() {
 }
 
 #[test]
+fn effective_route_display_tracks_inflight_and_last_auto_provider() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.auto_model = true;
+    app.pending_turn_route = Some((ApiProvider::Zai, "glm-5.2".to_string(), true));
+    assert_eq!(
+        app.effective_route_display(),
+        (ApiProvider::Zai, "glm-5.2".to_string())
+    );
+
+    app.pending_turn_route = None;
+    app.last_effective_provider = Some(ApiProvider::Xai);
+    app.last_effective_model = Some("grok-4.5".to_string());
+    assert_eq!(
+        app.effective_route_display(),
+        (ApiProvider::Xai, "grok-4.5".to_string())
+    );
+}
+
+#[test]
 fn test_cycle_mode_reverse_transitions() {
     let mut app = App::new(test_options(false), &Config::default());
 
     app.mode = AppMode::Plan;
     app.cycle_mode_reverse();
-    assert_eq!(app.mode, AppMode::Operate);
+    assert_eq!(app.mode, AppMode::Agent);
 
     app.mode = AppMode::Operate;
     app.cycle_mode_reverse();

@@ -970,12 +970,15 @@ const MAX_COMPOSER_DISPLAY_CHARS: usize = 4_000;
 const MAX_DRAFT_HISTORY: usize = 50;
 
 impl AppMode {
-    /// Keyboard cycle order: Plan -> Act -> Operate -> Plan.
+    /// Productive keyboard cycle: Plan -> Act -> Plan.
     ///
     /// `Auto` remains an internal variant while the real implementation is
     /// redesigned; do not expose it through user-facing mode selection (#3733).
     /// `Yolo` is kept for parse/back-compat only and is not in the Tab cycle.
-    pub const CYCLE: [Self; 3] = [Self::Plan, Self::Agent, Self::Operate];
+    /// Operate remains explicitly selectable for readiness inspection, but
+    /// Tab must not drop users into a fail-closed mode whose control board and
+    /// host-enforced workflow receipts are not shipped yet.
+    pub const CYCLE: [Self; 2] = [Self::Plan, Self::Agent];
 
     /// User-facing picker / numeric command order: 1 Act / 2 Plan / 3 Operate.
     pub const CHOICES: [Self; 3] = [Self::Agent, Self::Plan, Self::Operate];
@@ -1546,6 +1549,12 @@ pub enum SidebarRowAction {
     CancelAgent {
         agent_id: String,
     },
+    /// Safe read-only inspection for work rows without a mutable backend
+    /// action (for example an agent-owned To-do item).
+    InspectText {
+        label: String,
+        detail: String,
+    },
 }
 
 impl SidebarRowAction {
@@ -1556,7 +1565,8 @@ impl SidebarRowAction {
             Self::PrefillCommand(_)
             | Self::ToggleAgentDetails { .. }
             | Self::OpenAgentDetail { .. }
-            | Self::CancelAgent { .. } => None,
+            | Self::CancelAgent { .. }
+            | Self::InspectText { .. } => None,
         }
     }
 
@@ -1566,7 +1576,9 @@ impl SidebarRowAction {
             Self::Command(command) => command.contains(" cancel "),
             Self::PrefillCommand(command) => command.contains(" cancel "),
             Self::CancelAgent { .. } => true,
-            Self::ToggleAgentDetails { .. } | Self::OpenAgentDetail { .. } => false,
+            Self::ToggleAgentDetails { .. }
+            | Self::OpenAgentDetail { .. }
+            | Self::InspectText { .. } => false,
         }
     }
 }
@@ -1679,6 +1691,9 @@ pub struct App {
     pub composer: ComposerState,
     /// Viewport sub-state (scroll, cache, selection).
     pub viewport: ViewportState,
+    /// Ocean work-surface state. Kept separate from transcript/sidebar state
+    /// so the replacement shell can be removed or promoted as one unit.
+    pub work_surface: crate::tui::work_surface::WorkSurfaceState,
     /// Goal sub-state.
     pub hunt: HuntState,
     /// Session sub-state (cost, tokens, telemetry).
@@ -1739,6 +1754,8 @@ pub struct App {
     pub auto_model: bool,
     /// Last concrete model chosen while `auto_model` is active.
     pub last_effective_model: Option<String>,
+    /// Provider that actually served the latest auto-routed turn.
+    pub last_effective_provider: Option<ApiProvider>,
     /// Route selected for the in-flight turn. Consumed by `TurnComplete` to
     /// annotate `/cache` telemetry without widening the engine event surface.
     pub pending_turn_route: Option<(ApiProvider, String, bool)>,
@@ -1862,6 +1879,9 @@ pub struct App {
     pub show_tool_details: bool,
     pub ui_locale: Locale,
     pub cost_currency: CostCurrency,
+    /// Route payment truth. Model pricing alone cannot distinguish metered
+    /// API calls from OAuth or token-plan quota.
+    pub billing_presentation: crate::route_billing::BillingPresentation,
     pub composer_density: ComposerDensity,
     pub composer_border: bool,
     /// Voice input state — toggled by `/voice` and the voice hotbar action.
@@ -2516,10 +2536,10 @@ impl App {
             initial_input,
         } = options;
 
-        let launch_visible = resume_session_id.is_none() && initial_input.is_none();
-        let launch = LaunchState::new(launch_visible, &workspace);
-
         let settings = Settings::load().unwrap_or_else(|_| Settings::default());
+        let launch_visible =
+            settings.launch_screen && resume_session_id.is_none() && initial_input.is_none();
+        let launch = LaunchState::new(launch_visible, &workspace);
 
         // If settings.toml exists on disk but couldn't be parsed (we fell back
         // to defaults), surface a warning in the TUI so the user knows their
@@ -2703,7 +2723,7 @@ impl App {
             })
         };
 
-        // Start in Act mode with bypass approvals when --yolo or default_mode=yolo.
+        // Resolve the saved mode separately from the permission posture.
         let preferred_mode = AppMode::from_setting(&settings.default_mode);
         let yolo_compat = yolo || (preferred_mode == AppMode::Yolo && !start_in_agent_mode);
         let initial_mode = if yolo_compat || start_in_agent_mode {
@@ -2844,6 +2864,7 @@ impl App {
                 selection_anchor: None,
             },
             viewport: ViewportState::default(),
+            work_surface: crate::tui::work_surface::WorkSurfaceState::default(),
             hunt: HuntState::default(),
             session: SessionState::default(),
             active_allowed_tools: None,
@@ -2872,6 +2893,7 @@ impl App {
             provider_models,
             auto_model,
             last_effective_model: None,
+            last_effective_provider: None,
             pending_turn_route: None,
             api_provider: provider,
             provider_chain,
@@ -2916,6 +2938,7 @@ impl App {
             show_tool_details,
             ui_locale,
             cost_currency,
+            billing_presentation: crate::route_billing::for_route(config, provider),
             composer_density,
             composer_border,
             voice_enabled: false,
@@ -3340,7 +3363,7 @@ impl App {
         }
     }
 
-    /// Cycle through modes: Plan → Act → Operate → Plan.
+    /// Cycle through productive modes: Plan → Act → Plan.
     pub fn cycle_mode(&mut self) {
         if self.reject_setting_change_while_busy("Mode") {
             return;
@@ -4328,15 +4351,6 @@ impl App {
         let _ = panel.toggle_expanded();
         self.needs_redraw = true;
         true
-    }
-
-    /// Request cancel from the workflow panel. Returns the run id when the
-    /// host should dispatch `workflow` action=cancel.
-    pub fn request_workflow_panel_cancel(&mut self) -> Option<String> {
-        let panel = self.workflow_panel.as_mut()?;
-        let run_id = panel.request_cancel()?;
-        self.needs_redraw = true;
-        Some(run_id)
     }
 
     pub fn push_status_toast(
@@ -6297,6 +6311,7 @@ impl App {
         };
         self.auto_model = auto_model;
         self.last_effective_model = None;
+        self.last_effective_provider = None;
         self.last_effective_reasoning_effort = None;
         if auto_model {
             self.reasoning_effort = ReasoningEffort::Auto;
@@ -6341,6 +6356,24 @@ impl App {
             return "auto".to_string();
         }
         self.model.clone()
+    }
+
+    /// Provider/model identity used by the in-flight or most recent request.
+    /// This is the display contract for auto routing and must match billing.
+    #[must_use]
+    pub fn effective_route_display(&self) -> (ApiProvider, String) {
+        if let Some((provider, model, _)) = self.pending_turn_route.as_ref() {
+            return (*provider, model.clone());
+        }
+        if self.auto_model
+            && let (Some(provider), Some(model)) = (
+                self.last_effective_provider,
+                self.last_effective_model.as_ref(),
+            )
+        {
+            return (provider, model.clone());
+        }
+        (self.api_provider, self.model_display_label())
     }
 
     pub fn reasoning_effort_display_label(&self) -> String {

@@ -75,12 +75,10 @@ fn spawn_minimal(
     Ok((ws, h))
 }
 
-/// The product now starts at a real pre-session launch surface. PTY scenarios
-/// below exercise composer/runtime behavior, so cross that boundary exactly
-/// as a user does instead of bypassing the launch contract with test flags.
+/// PTY scenarios exercise composer/runtime behavior. The default startup now
+/// enters a session directly; users who explicitly enable `launch_screen`
+/// retain the separate launch surface, covered by unit rendering tests.
 fn enter_launch_session(h: &mut Harness) -> anyhow::Result<()> {
-    h.wait_for_text("New session", BOOT_TIMEOUT)?;
-    h.send(keys::key::enter())?;
     h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
     Ok(())
 }

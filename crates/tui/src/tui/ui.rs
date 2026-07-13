@@ -2701,6 +2701,18 @@ async fn run_event_loop(
                                 (Some(provider), Some(model), auto_model)
                             })
                             .unwrap_or((None, None, false));
+                        let effective_turn_provider = provider.unwrap_or(app.api_provider);
+                        let effective_turn_model = model
+                            .as_deref()
+                            .filter(|model| !model.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                app.last_effective_model.as_deref().unwrap_or(&app.model)
+                            })
+                            .to_string();
+                        app.last_effective_provider = Some(effective_turn_provider);
+                        if app.auto_model {
+                            app.last_effective_model = Some(effective_turn_model.clone());
+                        }
                         app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
                             provider,
                             model,
@@ -2724,15 +2736,13 @@ async fn run_event_loop(
                         }
 
                         // Update session cost
-                        let pricing_model = if app.auto_model {
-                            app.last_effective_model.as_deref().unwrap_or(&app.model)
-                        } else {
-                            &app.model
-                        };
-                        let turn_cost = crate::pricing::calculate_turn_cost_estimate_for_provider(
-                            app.api_provider,
-                            pricing_model,
+                        let billing =
+                            crate::route_billing::for_route(config, effective_turn_provider);
+                        let turn_cost = crate::pricing::calculate_turn_cost_estimate_for_route(
+                            effective_turn_provider,
+                            &effective_turn_model,
                             &usage,
+                            billing,
                         );
                         if let Some(cost) = turn_cost {
                             app.accrue_session_cost_estimate(cost);
@@ -3593,19 +3603,19 @@ async fn run_event_loop(
             let events = app.view_stack.tick();
             if !events.is_empty() {
                 app.needs_redraw = true;
-            }
-            if handle_view_events(
-                terminal,
-                app,
-                config,
-                &task_manager,
-                &mut engine_handle,
-                &mut web_config_session,
-                events,
-            )
-            .await?
-            {
-                return Ok(());
+                if handle_view_events_boxed(
+                    terminal,
+                    app,
+                    config,
+                    &task_manager,
+                    &mut engine_handle,
+                    &mut web_config_session,
+                    events,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
             }
         }
 
@@ -3999,7 +4009,7 @@ async fn run_event_loop(
                     continue;
                 }
                 let events = handle_mouse_event(app, mouse);
-                if handle_view_events(
+                if handle_view_events_boxed(
                     terminal,
                     app,
                     config,
@@ -4107,16 +4117,25 @@ async fn run_event_loop(
                         if key.modifiers == KeyModifiers::NONE
                             || key.modifiers == KeyModifiers::SHIFT =>
                     {
+                        if matches!(ch, 'c' | 'C' | 'x' | 'X')
+                            && let Some(panel) = app.workflow_panel.as_ref()
+                            && panel.lifecycle.is_running()
+                        {
+                            let run_id = panel.run_id.clone();
+                            app.input = format!("/workflow cancel {run_id}");
+                            app.cursor_position = app.input.chars().count();
+                            app.status_message =
+                                Some(app.tr(MessageId::SidebarDestructiveArmed).into_owned());
+                            if let Some(panel) = app.workflow_panel.as_mut() {
+                                panel.keyboard_focus = false;
+                            }
+                            app.needs_redraw = true;
+                            handled = true;
+                        }
                         if let Some(panel) = app.workflow_panel.as_mut()
+                            && !handled
                             && panel.handle_key(ch)
                         {
-                            if matches!(ch, 'c' | 'C' | 'x' | 'X')
-                                && let Some(run_id) = panel.take_cancel_emit()
-                            {
-                                app.status_message = Some(format!(
-                                    "Cancelling workflow {run_id}… (dispatch via /workflow cancel {run_id})"
-                                ));
-                            }
                             app.needs_redraw = true;
                             handled = true;
                         }
@@ -4127,6 +4146,50 @@ async fn run_event_loop(
                     submit_initial_input_if_ready(app, config, &engine_handle).await?;
                     continue;
                 }
+            }
+
+            // The Ocean work surface is a real focus owner. Route its keys
+            // before global transcript/composer navigation so PageUp/Down,
+            // Home/End, arrows, and row actions stay panel-local.
+            if app.view_stack.is_empty()
+                && let Some(action) = crate::tui::work_surface::handle_key(app, key)
+            {
+                if let Some(action) = action {
+                    match action {
+                        crate::tui::app::SidebarRowAction::Command(command) => {
+                            if execute_command_input(
+                                terminal,
+                                app,
+                                &mut engine_handle,
+                                &task_manager,
+                                config,
+                                &mut web_config_session,
+                                &command,
+                            )
+                            .await?
+                            {
+                                return Ok(());
+                            }
+                        }
+                        crate::tui::app::SidebarRowAction::CancelAgent { agent_id } => {
+                            app.status_message = Some(format!("Cancelling {agent_id}..."));
+                            if engine_handle
+                                .send(Op::CancelSubAgent {
+                                    agent_id: agent_id.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                app.status_message = Some(format!("Could not cancel {agent_id}"));
+                            }
+                        }
+                        other => {
+                            let _ = crate::tui::mouse_ui::apply_sidebar_row_action(app, other);
+                        }
+                    }
+                }
+                submit_initial_input_if_ready(app, config, &engine_handle).await?;
+                continue;
             }
 
             // Handle onboarding flow
@@ -4325,7 +4388,7 @@ async fn run_event_loop(
                 if !app.view_stack.is_empty() {
                     let events = app.view_stack.handle_key(key);
                     app.needs_redraw = true;
-                    if handle_view_events(
+                    if handle_view_events_boxed(
                         terminal,
                         app,
                         config,
@@ -4569,7 +4632,7 @@ async fn run_event_loop(
             if !app.view_stack.is_empty() {
                 let events = app.view_stack.handle_key(key);
                 app.needs_redraw = true;
-                if handle_view_events(
+                if handle_view_events_boxed(
                     terminal,
                     app,
                     config,
@@ -6644,6 +6707,7 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
 
     *config = previous_config;
     app.api_provider = previous_provider;
+    app.billing_presentation = crate::route_billing::for_route(config, previous_provider);
     app.set_model_selection(previous_model.clone());
     app.provider_models
         .insert(previous_provider.as_str().to_string(), previous_model);
@@ -7441,6 +7505,7 @@ async fn dispatch_user_message(
     if let Some(selection) = auto_selection.as_ref() {
         if app.auto_model {
             app.last_effective_model = Some(effective_model.clone());
+            app.last_effective_provider = Some(effective_provider);
             let mut status = format!(
                 "Auto model selected: {} / {effective_model} via {}",
                 selection.provider.display_name(),
@@ -7456,6 +7521,7 @@ async fn dispatch_user_message(
         }
     } else {
         app.last_effective_model = None;
+        app.last_effective_provider = None;
     }
 
     app.pending_turn_route = Some((effective_provider, effective_model.clone(), app.auto_model));
@@ -8014,6 +8080,7 @@ async fn switch_provider(
     let new_endpoint = display_base_url_host(&new_base_url);
     let cache_scope_changed = previous_provider != target || previous_model != new_model;
     app.api_provider = target;
+    app.billing_presentation = crate::route_billing::for_route(config, target);
     app.max_subagents = config
         .max_subagents_for_provider(target)
         .clamp(1, crate::config::MAX_SUBAGENTS);
@@ -8174,6 +8241,7 @@ async fn apply_provider_fallback_switch(
         return;
     }
     *config = next_config;
+    app.billing_presentation = crate::route_billing::for_route(config, target);
 
     let new_base_url = resolved_endpoint;
     let new_endpoint = display_base_url_host(&new_base_url);
@@ -8826,8 +8894,8 @@ async fn apply_command_result(
                     // Avoids re-reading settings.toml from disk on every
                     // `/theme` invocation.
                     let original = app.theme_id.name().to_string();
-                    app.view_stack.push(
-                        crate::tui::theme_picker::ThemePickerView::new_with_treatment(
+                    app.view_stack.push_boxed(
+                        crate::tui::theme_picker::ThemePickerView::boxed_with_treatment(
                             original,
                             app.ocean_treatment,
                             app.ui_locale,
@@ -8978,6 +9046,8 @@ async fn apply_command_result(
                     Ok(new_config) => {
                         *config = new_config.clone();
                         app.api_provider = config.api_provider();
+                        app.billing_presentation =
+                            crate::route_billing::for_route(config, app.api_provider);
                         let new_model = config.default_model();
                         app.set_model_selection(new_model.clone());
                         app.set_active_context_window_override(
@@ -9935,7 +10005,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     if !mention_menu_entries.is_empty() && app.mention_menu_selected >= mention_menu_entries.len() {
         app.mention_menu_selected = mention_menu_entries.len().saturating_sub(1);
     }
-    let top_work_strip_height = super::sidebar::top_work_strip_height(app, size.width, size.height);
+    let top_work_strip_height = super::work_surface::height(app, size.width, size.height);
 
     // Defensive two-pass layout: pin the header to the absolute top row,
     // then split the remaining body area for chat / preview / composer /
@@ -10015,7 +10085,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         .split(body_area);
 
     if top_work_strip_height > 0 {
-        super::sidebar::render_top_work_strip(f, body_chunks[0], app);
+        super::work_surface::render(f, body_chunks[0], app);
     }
 
     if classic_shell {
@@ -11328,6 +11398,30 @@ async fn handle_view_events(
     Ok(false)
 }
 
+/// Keep the very large modal-event dispatcher out of the already-large TUI
+/// loop future. Without this heap boundary, opening a modal can inflate the
+/// main-thread future enough to overflow its stack before the next frame.
+#[allow(clippy::too_many_arguments)]
+fn handle_view_events_boxed<'a>(
+    terminal: &'a mut AppTerminal,
+    app: &'a mut App,
+    config: &'a mut Config,
+    task_manager: &'a SharedTaskManager,
+    engine_handle: &'a mut EngineHandle,
+    web_config_session: &'a mut Option<WebConfigSession>,
+    events: Vec<ViewEvent>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + 'a>> {
+    Box::pin(handle_view_events(
+        terminal,
+        app,
+        config,
+        task_manager,
+        engine_handle,
+        web_config_session,
+        events,
+    ))
+}
+
 fn push_approval_request_view(
     app: &mut App,
     id: &str,
@@ -12238,6 +12332,7 @@ fn restore_loaded_session_provider(app: &mut App, config: &mut Config, model_pro
 
     app.api_provider = provider;
     config.provider = Some(provider.as_str().to_string());
+    app.billing_presentation = crate::route_billing::for_route(config, provider);
     app.max_subagents = config
         .max_subagents_for_provider(provider)
         .clamp(1, crate::config::MAX_SUBAGENTS);

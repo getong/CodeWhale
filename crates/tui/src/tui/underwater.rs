@@ -370,7 +370,7 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         .style(Style::default().bg(app.ui_theme.surface_bg))
         .render(area, buf);
     let width = usize::from(area.width);
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version = format!("v{}", env!("DEEPSEEK_BUILD_VERSION"));
     let workspace_budget = width.saturating_sub(version.width() + 6);
     let workspace = truncate_to_width(
         &crate::utils::display_path(&app.workspace),
@@ -542,6 +542,8 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         .style(Style::default().bg(app.ui_theme.header_bg))
         .render(area, buf);
 
+    let (effective_provider, effective_model) = app.effective_route_display();
+    let route_label = format!("{} · {effective_model}", effective_provider.display_name());
     let mut left = vec![
         Span::styled(
             "cw",
@@ -550,10 +552,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(
-            app.model_display_label(),
-            Style::default().fg(app.ui_theme.text_muted),
-        ),
+        Span::styled(route_label, Style::default().fg(app.ui_theme.text_muted)),
         Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
         Span::styled(
             mode_label(app.ui_locale, app.mode),
@@ -575,19 +574,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         ));
     }
 
-    let running_agents = crate::tui::subagent_routing::running_agent_count(app);
     let mut right = Vec::new();
-    if tier == ShellTier::Wide && running_agents > 0 {
-        right.push(Span::styled(
-            tr(app.ui_locale, MessageId::HeaderAgentsChip)
-                .replace("{count}", &running_agents.to_string()),
-            Style::default().fg(app.ui_theme.text_muted),
-        ));
-        right.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
-    }
     if tier != ShellTier::Compact
         && let Some((used, max, percent)) = crate::tui::ui::context_usage_snapshot(app)
     {
@@ -609,7 +596,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
             right.push(Span::raw("  "));
         }
         right.push(Span::styled(
-            format!("v{}", env!("CARGO_PKG_VERSION")),
+            format!("v{}", env!("DEEPSEEK_BUILD_VERSION")),
             Style::default().fg(app.ui_theme.text_hint),
         ));
     }
@@ -705,7 +692,7 @@ pub fn render_footer(area: Rect, buf: &mut Buffer, app: &mut App) {
         ));
     }
     let cost = app.displayed_session_cost_for_currency(app.cost_currency);
-    if cost > 0.000_001 && tier != ShellTier::Compact {
+    if app.billing_presentation.shows_money() && cost > 0.000_001 && tier != ShellTier::Compact {
         left.push(Span::styled(
             " · ",
             Style::default().fg(app.ui_theme.text_dim),

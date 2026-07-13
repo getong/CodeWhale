@@ -1288,6 +1288,13 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Display,
+                key: "launch_screen".to_string(),
+                value: settings.launch_screen.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
                 key: "show_thinking".to_string(),
                 value: settings.show_thinking.to_string(),
                 editable: true,
@@ -1971,6 +1978,7 @@ fn config_label_for_key(key: &str) -> String {
         "calm_mode" => "Calm mode",
         "low_motion" => "Low motion",
         "fancy_animations" => "Animations",
+        "launch_screen" => "Launch screen",
         "show_thinking" => "Show thinking",
         "show_tool_details" => "Tool detail level",
         "status_indicator" => "Status indicator",
@@ -2034,6 +2042,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "auto_compact"
         | "calm_mode"
         | "low_motion"
+        | "launch_screen"
         | "show_thinking"
         | "show_tool_details"
         | "composer_border"
@@ -2064,7 +2073,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
             "current provider endpoint; Xiaomi: token-plan | pay-as-you-go | custom URL"
         }
         "cost_currency" => "usd | cny",
-        "default_mode" => "agent | plan | yolo",
+        "default_mode" => "agent | plan | operate",
         "sidebar_width" => "10..=50",
         "sidebar_focus" => "auto | work | tasks | agents | context | hidden",
         "max_history" => "integer (0 allowed)",

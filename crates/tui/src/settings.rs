@@ -279,7 +279,12 @@ pub struct Settings {
     pub composer_vim_mode: String,
     /// Transcript spacing rhythm: compact, comfortable, spacious
     pub transcript_spacing: String,
-    /// Default mode: "agent", "plan", "yolo"
+    /// Show the pre-session launch menu. When false, Codewhale enters a new
+    /// session directly; resume remains available in-session.
+    #[serde(default)]
+    pub launch_screen: bool,
+    /// Default mode: "agent", "plan", "operate". Legacy permission
+    /// shorthands are accepted for migration but never advertised as modes.
     pub default_mode: String,
     /// Sidebar width as percentage of terminal width
     pub sidebar_width_percent: u16,
@@ -399,7 +404,8 @@ impl Default for Settings {
             composer_density: "comfortable".to_string(),
             composer_border: true,
             composer_vim_mode: "normal".to_string(),
-            transcript_spacing: "compact".to_string(),
+            transcript_spacing: "comfortable".to_string(),
+            launch_screen: false,
             default_mode: "agent".to_string(),
             sidebar_width_percent: 28,
             sidebar_focus: "auto".to_string(),
@@ -615,13 +621,13 @@ impl Settings {
             self.fancy_animations = false;
         }
 
-        // tmux/screen activity monitors treat purely animated redraws as
-        // activity. Keep multiplexer sessions calm by pinning animations.
+        // Multiplexers need a bounded redraw rate, not a different product.
+        // Preserve authored motion and let the frame limiter protect tmux /
+        // screen; NO_ANIMATIONS remains the explicit hard-off contract.
         let in_terminal_multiplexer = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty())
             || std::env::var_os("STY").is_some_and(|v| !v.is_empty());
         if in_terminal_multiplexer {
-            self.low_motion = true;
-            self.fancy_animations = false;
+            self.constrained_frame_rate = true;
         }
 
         // Plain Windows PowerShell / cmd.exe under legacy ConHost exposes none
@@ -806,6 +812,9 @@ impl Settings {
                 }
                 self.transcript_spacing = normalized.to_string();
             }
+            "launch_screen" | "launch" => {
+                self.launch_screen = parse_bool(value)?;
+            }
             "status_indicator" | "indicator" => {
                 let normalized = normalize_status_indicator(value);
                 if !["cw", "whale", "dots", "off"].contains(&normalized) {
@@ -832,9 +841,9 @@ impl Settings {
             }
             "default_mode" | "mode" => {
                 let normalized = normalize_mode(value);
-                if !["agent", "plan", "yolo"].contains(&normalized) {
+                if !["agent", "plan", "operate", "yolo"].contains(&normalized) {
                     anyhow::bail!(
-                        "Failed to update setting: invalid mode '{value}'. Expected: agent, plan, yolo."
+                        "Failed to update setting: invalid mode '{value}'. Expected: agent, plan, operate."
                     );
                 }
                 self.default_mode = normalized.to_string();
@@ -1009,6 +1018,7 @@ impl Settings {
             self.workspace_follow_symlinks
         ));
         lines.push(format!("  default_mode:       {}", self.default_mode));
+        lines.push(format!("  launch_screen:      {}", self.launch_screen));
         lines.push(format!(
             "  sidebar_width:      {}%",
             self.sidebar_width_percent
@@ -1120,6 +1130,10 @@ impl Settings {
                 "Transcript spacing: compact, comfortable, spacious",
             ),
             (
+                "launch_screen",
+                "Show the pre-session launch menu on startup: on/off",
+            ),
+            (
                 "status_indicator",
                 "Header status indicator next to effort chip: cw, whale, dots, off",
             ),
@@ -1135,7 +1149,7 @@ impl Settings {
                 "workspace_follow_symlinks",
                 "Follow symbolic links during workspace file discovery walks: on/off (default off). Enable for symlink-based multi-project workspaces. Has built-in cycle detection but may increase latency on large symlinked trees.",
             ),
-            ("default_mode", "Default mode: agent, plan, yolo"),
+            ("default_mode", "Default mode: agent, plan, operate"),
             ("sidebar_width", "Sidebar width percentage: 10-50"),
             (
                 "sidebar_focus",
@@ -1422,6 +1436,7 @@ fn normalize_mode(value: &str) -> &str {
         "normal" => "agent",
         "agent" => "agent",
         "plan" => "plan",
+        "operate" | "operation" | "ops" => "operate",
         "yolo" => "yolo",
         _ => value,
     }
@@ -1648,13 +1663,13 @@ mod tests {
     }
 
     #[test]
-    fn default_settings_are_compact_presentation() {
+    fn default_settings_use_comfortable_transcript_spacing() {
         let settings = Settings::default();
         assert!(settings.calm_mode);
         assert!(!settings.show_tool_details);
         assert!(!settings.low_motion);
         assert!(settings.fancy_animations);
-        assert_eq!(settings.transcript_spacing, "compact");
+        assert_eq!(settings.transcript_spacing, "comfortable");
         assert_eq!(settings.tool_collapse_mode, "compact");
         // Thinking stays visible — compact is not "hide evidence".
         assert!(settings.show_thinking);
@@ -1708,6 +1723,11 @@ mod tests {
             "underwater presentation is the default"
         );
         assert!(!settings.low_motion);
+        assert_eq!(settings.transcript_spacing, "comfortable");
+        assert!(
+            !settings.launch_screen,
+            "returning users enter a session directly"
+        );
     }
 
     #[test]
@@ -2539,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_multiplexer_env_forces_low_motion_on() {
+    fn terminal_multiplexer_caps_redraws_without_disabling_motion() {
         let _g = term_program_test_guard();
         let vars = [
             "TMUX",
@@ -2571,13 +2591,14 @@ mod tests {
             assert!(!settings.low_motion, "default is animated");
             assert!(settings.fancy_animations, "default shows the water strip");
             settings.apply_env_overrides();
+            assert!(!settings.low_motion, "{var} must preserve authored motion");
             assert!(
-                settings.low_motion,
-                "{var}={val:?} must enable low_motion under terminal multiplexers (#1925)"
+                settings.fancy_animations,
+                "{var} must preserve Ocean motion"
             );
             assert!(
-                !settings.fancy_animations,
-                "{var}={val:?} must disable fancy_animations under terminal multiplexers (#1925)"
+                settings.constrained_frame_rate,
+                "{var}={val:?} must cap redraws under terminal multiplexers"
             );
         }
 

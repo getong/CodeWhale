@@ -900,6 +900,9 @@ pub(crate) fn footer_context_percent_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 pub(crate) fn footer_cost_spans(app: &App) -> Vec<Span<'static>> {
+    if !app.billing_presentation.shows_money() {
+        return Vec::new();
+    }
     let displayed_cost = app.displayed_session_cost_for_currency(app.cost_currency);
     if !should_show_footer_cost(displayed_cost) {
         return Vec::new();

@@ -144,16 +144,21 @@ impl ModalView for ModePickerView {
             };
             let pointer = if is_cursor { ">" } else { " " };
             let name = mode.display_name_localized(self.locale);
+            let hint = if mode == AppMode::Operate {
+                "Coordinate a Fleet (preview); Workflow isn't ready.".into()
+            } else {
+                mode.picker_hint_localized(self.locale)
+            };
             // Pad by terminal columns, not scalar count, so wide (CJK) mode
             // names keep the hint column aligned.
-            let pad = " ".repeat(7usize.saturating_sub(UnicodeWidthStr::width(&*name)));
+            let pad = " ".repeat(8usize.saturating_sub(UnicodeWidthStr::width(&*name)));
 
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{pointer} {}. {name}{pad}", mode.number()),
                     row_style,
                 ),
-                Span::styled(mode.picker_hint_localized(self.locale), hint_style),
+                Span::styled(hint, hint_style),
             ]));
         }
 
@@ -256,10 +261,8 @@ mod tests {
     fn operate_copy_explains_the_user_benefit_at_eighty_columns() {
         let (buf, area) = render_at(80, 24);
         let text = rows(&buf, area).join("\n");
-        assert!(
-            text.contains("Coordinate a Fleet for multi-step work."),
-            "{text}"
-        );
+        assert!(text.contains("Coordinate a Fleet (preview)"), "{text}");
+        assert!(text.contains("isn't ready"), "{text}");
         assert!(!text.contains("spawn, wait, verify"), "{text}");
         assert!(!text.contains("subagents/workflows"), "{text}");
     }

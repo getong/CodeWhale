@@ -174,11 +174,9 @@ fn common_tui_builder(ws: &SealedWorkspace) -> qa_harness::harness::HarnessBuild
         .size(42, 150)
 }
 
-/// Release scenarios exercise the session runtime, so cross the real launch
-/// surface the same way a user does before waiting for the composer.
+/// Release scenarios exercise the direct-session runtime. The optional launch
+/// screen is not enabled in these sealed homes.
 fn enter_launch_session(harness: &mut Harness) -> Result<()> {
-    harness.wait_for_text("New session", BOOT_TIMEOUT)?;
-    harness.send(keys::key::enter())?;
     harness.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
     Ok(())
 }
@@ -208,7 +206,9 @@ fn wait_for_counter(
 
 fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
     harness.send(keys::key::text(text))?;
-    harness.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    // Rapid PTY writes intentionally exercise paste-burst detection. Wait
+    // beyond its 120 ms trailing-Enter suppression window before submitting.
+    harness.wait_for_idle(Duration::from_millis(250), Duration::from_secs(2))?;
     harness.send(keys::key::enter())?;
     Ok(())
 }
@@ -278,12 +278,46 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
     let ws = make_sealed_workspace()?;
     let mut tui = common_tui_builder(&ws)
         .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1")
         .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
         .env("COLORTERM", "truecolor")
+        .env("RUST_BACKTRACE", "1")
         .spawn()?;
     enter_launch_session(&mut tui)?;
-    type_and_submit(&mut tui, "/theme")?;
-    tui.wait_for_text("theme · live preview", INTERACTION_TIMEOUT)?;
+    // A bracketed paste plus trailing space makes this an explicit command
+    // invocation, outside both autocomplete and unbracketed burst handling.
+    tui.paste("/theme ")?;
+    tui.wait_for_text("/theme", Duration::from_secs(3))?;
+    tui.wait_for_idle(Duration::from_millis(200), Duration::from_secs(2))?;
+    tui.send(keys::key::enter())?;
+    std::thread::sleep(Duration::from_millis(300));
+    tui.pump();
+    if let Some(status) = tui.wait_for_exit(Duration::from_millis(1)) {
+        let logs = std::fs::read_dir(ws.home().join(".codewhale/logs"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(anyhow!(
+            "theme picker process exited with {status}:\n{}\nlogs:\n{logs}",
+            tui.debug_dump(),
+        ));
+    }
+    if tui
+        .wait_for_text("Pick a theme", Duration::from_secs(1))
+        .is_err()
+    {
+        // A PTY can deliver the first Enter inside the paste guard's trailing
+        // suppression window. Once that window expires, the next deliberate
+        // Enter must execute the retained draft.
+        tui.wait_for_idle(Duration::from_millis(250), Duration::from_secs(2))?;
+        tui.send(keys::key::enter())?;
+        tui.wait_for_text("Pick a theme", INTERACTION_TIMEOUT)?;
+    }
 
     let labels = [
         "System",
@@ -497,16 +531,17 @@ async fn release_six_worker_fanout_keeps_typing_render_and_esc_cancel_live() -> 
     tui.wait_for(
         |frame| {
             let text = frame.text();
-            text.contains("agents 6") && text.matches("delegate scout [running]").count() >= 6
+            text.to_ascii_lowercase().contains("workers 6")
+                && (text.matches("Agent ").count() >= 6
+                    || text.matches("delegate scout [running]").count() >= 6)
         },
         Duration::from_secs(5),
     )?;
 
     let fanout_frame = tui.debug_dump();
     assert!(
-        fanout_frame.contains("agents 6")
-            && fanout_frame.matches("delegate scout [running]").count() >= 6,
-        "all six workers were not visible in the underwater ledger:\n{fanout_frame}"
+        fanout_frame.to_ascii_lowercase().contains("workers 6"),
+        "all six workers were not visible in the owned Work surface:\n{fanout_frame}"
     );
 
     // The provider is deliberately holding every child open. Prove keyboard

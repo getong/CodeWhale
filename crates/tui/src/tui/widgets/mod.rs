@@ -3055,7 +3055,11 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
 
     let prefix = input.trim_start_matches('/');
     let completing_skill_arg = prefix.strip_prefix("skill ").map(str::trim_start);
-    if input.contains(char::is_whitespace) && completing_skill_arg.is_none() {
+    let completing_model_arg = prefix.strip_prefix("model ").map(str::trim_start);
+    if input.contains(char::is_whitespace)
+        && completing_skill_arg.is_none()
+        && completing_model_arg.is_none()
+    {
         return Vec::new();
     }
     let mut entries: Vec<SlashMenuEntry> = Vec::new();
@@ -3063,7 +3067,7 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
 
     // ── Phase 1: prefix (starts_with) matches ─────────────────────────
     // Highest priority — preserves existing exact-prefix completion.
-    if completing_skill_arg.is_none() {
+    if completing_skill_arg.is_none() && completing_model_arg.is_none() {
         commands::user_registry::with_registry_for_workspace(workspace, |registry| {
             let all_user_commands = registry.iter().collect::<Vec<_>>();
             let user_commands = all_user_commands
@@ -3189,6 +3193,27 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
     }
 
     // ── Skills (only after user has typed `/skill `) ──────────────────
+    // `/model <prefix>` is the only slash-argument path that needs the
+    // provider inventory. Filter it here instead of rebuilding that inventory
+    // for every generic slash-menu keystroke.
+    if let Some(model_prefix) = completing_model_arg {
+        let model_prefix = model_prefix.to_ascii_lowercase();
+        for model_name in model_candidates {
+            let lower = model_name.to_ascii_lowercase();
+            if lower.starts_with(&model_prefix)
+                || lower.contains(&model_prefix)
+                || fuzzy_chars_in_order(&model_prefix, &lower)
+            {
+                entries.push(SlashMenuEntry {
+                    name: format!("/model {model_name}"),
+                    description: String::from("Switch to this model"),
+                    is_skill: false,
+                    alias_hint: None,
+                });
+            }
+        }
+    }
+
     let skill_prefix = completing_skill_arg.unwrap_or(prefix).to_ascii_lowercase();
     if completing_skill_arg.is_some() {
         for (skill_name, skill_desc) in cached_skills {

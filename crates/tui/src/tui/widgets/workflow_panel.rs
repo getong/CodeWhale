@@ -392,16 +392,12 @@ pub struct WorkflowPanel {
     pub started_at_ms: u64,
     pub completed_at_ms: Option<u64>,
     pub error: Option<String>,
-    pub cancel_requested: bool,
     /// Optional final result / verification summary for the history card.
     pub result_summary: Option<String>,
     /// Source script path or other durable artifact pointer.
     pub source_path: Option<PathBuf>,
     /// Spillover / full-output path when the tool result was large.
     pub spillover_path: Option<PathBuf>,
-    /// Set when the operator requested cancel from the panel (mouse/key).
-    /// Consumed by the host to drive `/workflow cancel`.
-    cancel_emit: Option<String>,
     /// UI locale for rendered copy. Defaults to English; hosts with app
     /// access set it after construction (#4057 wave 2).
     pub locale: Locale,
@@ -435,11 +431,9 @@ impl WorkflowPanel {
             started_at_ms: at_ms,
             completed_at_ms: None,
             error: None,
-            cancel_requested: false,
             result_summary: None,
             source_path: None,
             spillover_path: None,
-            cancel_emit: None,
             locale: Locale::En,
         }
     }
@@ -1249,24 +1243,6 @@ impl WorkflowPanel {
             .unwrap_or(self.phases.len() - 1);
     }
 
-    /// Request cancel from the panel. Returns the run id when a cancel should
-    /// be dispatched to the workflow tool. Running children stay running until
-    /// the host interrupt/cancel path finalizes them (or a terminal event
-    /// arrives).
-    pub fn request_cancel(&mut self) -> Option<String> {
-        if !self.lifecycle.is_running() || self.cancel_requested {
-            return None;
-        }
-        self.cancel_requested = true;
-        self.cancel_emit = Some(self.run_id.clone());
-        self.cancel_emit.clone()
-    }
-
-    /// Take a pending cancel emit (run_id) once.
-    pub fn take_cancel_emit(&mut self) -> Option<String> {
-        self.cancel_emit.take()
-    }
-
     /// Interrupt finalizes every still-running child as cancelled and marks
     /// the run cancelled. Preserves the panel until the next workflow starts.
     pub fn finalize_interrupt(&mut self) {
@@ -1290,7 +1266,10 @@ impl WorkflowPanel {
         }
         match ch {
             't' | 'T' | ' ' => self.toggle_expanded(),
-            'c' | 'C' | 'x' | 'X' => self.request_cancel().is_some(),
+            // Cancellation is host-owned because it must arm the exact
+            // `/workflow cancel <id>` command before dispatch. The widget
+            // never mutates lifecycle state optimistically.
+            'c' | 'C' | 'x' | 'X' => false,
             'n' | 'N' | 'j' | 'J' => {
                 self.select_next_phase();
                 true
@@ -1354,11 +1333,7 @@ impl WorkflowPanel {
             _ => String::new(),
         };
         let cancel_hint = if self.lifecycle.is_running() {
-            if self.cancel_requested {
-                " · cancelling…"
-            } else {
-                " · [c] cancel"
-            }
+            " · [c] cancel"
         } else {
             ""
         };
@@ -2002,13 +1977,10 @@ mod tests {
         assert!(panel.handle_key('t'));
         assert!(!panel.expanded);
 
-        let run_id = panel.request_cancel().expect("cancel");
-        assert_eq!(run_id, "workflow_abc");
-        assert!(panel.cancel_requested);
-        // Second cancel is a no-op
-        assert!(panel.request_cancel().is_none());
-        assert_eq!(panel.take_cancel_emit().as_deref(), Some("workflow_abc"));
-        assert!(panel.take_cancel_emit().is_none());
+        assert!(
+            !panel.handle_key('c'),
+            "host owns armed workflow cancellation"
+        );
     }
 
     #[test]
@@ -2674,14 +2646,8 @@ mod tests {
             at_ms: 1_500,
         });
 
-        // Operator hits panel cancel.
-        let run_id = panel.request_cancel().expect("cancel while running");
-        assert_eq!(run_id, "wf_a4");
-        assert!(panel.cancel_requested);
-        assert!(panel.request_cancel().is_none(), "second cancel is no-op");
-        assert_eq!(panel.take_cancel_emit().as_deref(), Some("wf_a4"));
-
-        // Host interrupt finalizes remaining runners.
+        // A confirmed host interrupt finalizes remaining runners. The widget
+        // itself never claims cancellation before that runtime event.
         panel.finalize_interrupt();
         assert_eq!(panel.lifecycle, WorkflowPanelLifecycle::Cancelled);
 

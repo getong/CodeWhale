@@ -332,9 +332,15 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
         ..
     } = message
     {
+        let billing = crate::route_billing::for_child_route(
+            app.api_provider,
+            app.billing_presentation,
+            *provider,
+        );
         if app.session.subagent_cost_event_seqs.insert(seq)
-            && let Some(cost) =
-                crate::pricing::calculate_turn_cost_estimate_for_provider(*provider, model, usage)
+            && let Some(cost) = crate::pricing::calculate_turn_cost_estimate_for_route(
+                *provider, model, usage, billing,
+            )
         {
             app.accrue_subagent_cost_estimate(cost);
         }

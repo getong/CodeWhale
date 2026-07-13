@@ -1797,6 +1797,7 @@ fn create_test_app() -> App {
     // a machine with customized settings the context-window tests computed
     // against a different model than the requested deepseek-v4-pro.
     app.api_provider = crate::config::ApiProvider::Deepseek;
+    app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
     app.model = "deepseek-v4-pro".to_string();
     app.auto_model = false;
     app.last_effective_model = None;
@@ -6943,7 +6944,7 @@ fn visible_slash_model_completions_are_provider_scoped() {
         "openrouter".to_string(),
         crate::config::DEFAULT_OPENROUTER_MODEL.to_string(),
     );
-    app.input = "/model".to_string();
+    app.input = "/model deep".to_string();
     app.cursor_position = app.input.chars().count();
 
     let entries = visible_slash_menu_entries(&app, 128);
@@ -9121,6 +9122,8 @@ fn picker_rename_of_inactive_session_does_not_touch_active_metadata() {
 fn codex_tool_child_usage_does_not_inherit_public_api_pricing() {
     let mut app = create_test_app();
     app.api_provider = crate::config::ApiProvider::OpenaiCodex;
+    app.billing_presentation =
+        crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota");
     let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(
         serde_json::json!({
             "child_model": "gpt-5.5",

@@ -1573,8 +1573,10 @@ fn turn_route_lines(app: &App) -> Vec<String> {
     }
 
     let cost = app.displayed_session_cost_for_currency(app.cost_currency);
-    if cost > 0.0 {
+    if app.billing_presentation.shows_money() && cost > 0.0 {
         lines.push(format!("Cost (session): {}", app.format_cost_amount(cost)));
+    } else if let Some(label) = app.billing_presentation.label() {
+        lines.push(format!("Usage plan: {label}"));
     }
 
     lines

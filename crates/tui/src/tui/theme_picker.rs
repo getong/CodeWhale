@@ -79,6 +79,22 @@ impl ThemePickerView {
         }
     }
 
+    /// Construct behind type erasure before returning to the async event loop.
+    /// Keeping the concrete picker out of that already-large future prevents
+    /// transient modal values from inflating the main-thread stack frame.
+    #[must_use]
+    pub fn boxed_with_treatment(
+        original_name: String,
+        ocean_treatment: crate::tui::ocean::OceanTreatment,
+        locale: Locale,
+    ) -> Box<dyn ModalView> {
+        Box::new(Self::new_with_treatment(
+            original_name,
+            ocean_treatment,
+            locale,
+        ))
+    }
+
     fn current(&self) -> ThemeId {
         SELECTABLE_THEMES
             .get(self.selected)
