@@ -19,6 +19,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Repo-aware resolver for `@`-mentions and file pickers.
 ///
@@ -146,17 +147,34 @@ impl Workspace {
     }
 
     fn build_file_index(&self) -> HashMap<String, Vec<PathBuf>> {
+        self.build_file_index_with_budget(COMPLETION_WALK_BUDGET)
+    }
+
+    /// Build the fuzzy-completion file index, stopping early once either the
+    /// entry cap or the wall-clock `budget` is reached.
+    ///
+    /// The index build runs synchronously on the input thread each time the
+    /// walk root changes (e.g. `@`-mentioning a non-workspace directory). The
+    /// entry cap alone doesn't bound latency: walking a large external tree
+    /// with no `.gitignore` can spend seconds just reaching 50k entries, which
+    /// froze the TUI (#4365). A time budget caps how long a single build can
+    /// block the UI; partial completions are far better than an unresponsive
+    /// terminal, and the next keystroke re-walks from cache anyway.
+    fn build_file_index_with_budget(&self, budget: Duration) -> HashMap<String, Vec<PathBuf>> {
+        let started = Instant::now();
         let mut index: HashMap<String, Vec<PathBuf>> = HashMap::new();
         let mut total: usize = 0;
         let builder =
             discovery_walk_builder(&self.root, self.completion_walk_depth, self.follow_links);
 
         for entry in builder.build().flatten() {
-            if total >= FILE_INDEX_MAX_ENTRIES {
+            if total >= FILE_INDEX_MAX_ENTRIES || started.elapsed() >= budget {
                 tracing::warn!(
                     target: "working_set",
                     limit = FILE_INDEX_MAX_ENTRIES,
-                    "file-index discovery hit the entry cap; truncating to keep first-turn latency bounded (#697)"
+                    budget_ms = budget.as_millis() as u64,
+                    over_budget = started.elapsed() >= budget,
+                    "file-index discovery hit the entry cap or time budget; truncating to keep completion latency bounded (#697, #4365)"
                 );
                 return index;
             }
@@ -175,7 +193,7 @@ impl Workspace {
 
         // Also index AI-tool dot-directories with gitignore disabled.
         for dir_name in DISCOVERY_ALWAYS_DIRS {
-            if total >= FILE_INDEX_MAX_ENTRIES {
+            if total >= FILE_INDEX_MAX_ENTRIES || started.elapsed() >= budget {
                 break;
             }
             let dot_dir = self.root.join(dir_name);
@@ -192,7 +210,7 @@ impl Workspace {
                 dot_builder.max_depth(Some(depth));
             }
             for entry in dot_builder.build().flatten() {
-                if total >= FILE_INDEX_MAX_ENTRIES {
+                if total >= FILE_INDEX_MAX_ENTRIES || started.elapsed() >= budget {
                     break;
                 }
                 // Exclude machine-generated bulk (e.g. .deepseek/snapshots/).
@@ -216,24 +234,27 @@ impl Workspace {
         // Beyond the curated dot-dir whitelist above, also index any explicit
         // hidden/ignored path the user might `@`-mention (e.g. a project's
         // own `.generated/specs/`). `local_reference_paths` walks with
-        // gitignore disabled but still honors `.deepseekignore`.
-        for path in local_reference_paths(
-            &self.root,
-            LOCAL_REFERENCE_SCAN_LIMIT,
-            self.completion_walk_depth,
-            self.follow_links,
-        ) {
-            if total >= FILE_INDEX_MAX_ENTRIES {
-                break;
+        // gitignore disabled but still honors `.deepseekignore`. Skip it once
+        // we're already over budget so it can't reintroduce the freeze.
+        if started.elapsed() < budget {
+            for path in local_reference_paths(
+                &self.root,
+                LOCAL_REFERENCE_SCAN_LIMIT,
+                self.completion_walk_depth,
+                self.follow_links,
+            ) {
+                if total >= FILE_INDEX_MAX_ENTRIES || started.elapsed() >= budget {
+                    break;
+                }
+                let Some(name) = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_lowercase())
+                else {
+                    continue;
+                };
+                index.entry(name).or_default().push(path);
+                total += 1;
             }
-            let Some(name) = path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_lowercase())
-            else {
-                continue;
-            };
-            index.entry(name).or_default().push(path);
-            total += 1;
         }
         index
     }
@@ -475,6 +496,14 @@ fn child_completion_walk_depth(depth: Option<usize>) -> Option<usize> {
 /// ~10s hang on the first turn). For typical projects 50K is well
 /// above the actual entry count and the cap is a no-op.
 const FILE_INDEX_MAX_ENTRIES: usize = 50_000;
+
+/// Wall-clock budget for a single [`Workspace::build_file_index`] pass. The
+/// entry cap bounds the result *size* but not the *time* spent reaching it: a
+/// large external tree with no `.gitignore` can spend seconds walking before
+/// hitting 50K entries, freezing the input thread (#4365). This caps how long
+/// one synchronous build may block the UI — over budget, we return whatever was
+/// gathered so far (partial completions beat an unresponsive terminal).
+const COMPLETION_WALK_BUDGET: Duration = Duration::from_millis(150);
 
 /// Configure a `WalkBuilder` for workspace discovery: hidden files,
 /// depth-limited, custom `.deepseekignore` honored, and gitignore overrides
@@ -1968,6 +1997,34 @@ mod tests {
                 .iter()
                 .any(|entry| entry.ends_with("target.txt")),
             "depth 0 should disable the completion walk depth limit: {unlimited_entries:?}",
+        );
+    }
+
+    #[test]
+    fn build_file_index_respects_time_budget() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..5 {
+            std::fs::write(tmp.path().join(format!("f{i}.rs")), "x").unwrap();
+        }
+        let ws = Workspace::with_cwd(tmp.path().to_path_buf(), None);
+
+        // A generous budget indexes every file.
+        let full = ws.build_file_index_with_budget(Duration::from_secs(60));
+        assert!(
+            full.contains_key("f0.rs") && full.contains_key("f4.rs"),
+            "a generous budget must index all files; got {:?}",
+            full.keys().collect::<Vec<_>>()
+        );
+
+        // #4365: a zero budget bails before walking the tree, so the build can
+        // never freeze the UI — it returns fewer entries than the full walk
+        // instead of blocking.
+        let starved = ws.build_file_index_with_budget(Duration::ZERO);
+        assert!(
+            starved.len() < full.len(),
+            "a zero time budget must stop the walk early: got {} entries, full walk had {}",
+            starved.len(),
+            full.len()
         );
     }
 
