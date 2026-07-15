@@ -15,6 +15,9 @@ describe("public website copy contracts", () => {
     expect(layout).not.toContain("Section 02");
     expect(layout).not.toContain("How Codewhale works: ego");
     expect(layout).not.toContain("<Seal");
+    expect(layout.indexOf('<article className="docs-content')).toBeLessThan(
+      layout.indexOf("<DocsSidebar"),
+    );
     expect(search).toContain("docs-topic-row");
     expect(search).not.toContain("40+ Markdown documents");
   });
@@ -80,5 +83,7 @@ describe("public website copy contracts", () => {
     expect(community).toContain("issues/new/choose");
     expect(community).toContain("docs/LOCALIZATION.md");
     expect(community).toContain("Hmbown/CodeWhale/pulls");
+    expect(community).toContain("keeps the weekly archive of repository activity");
+    expect(community).not.toContain("latest one sits near the top");
   });
 });
