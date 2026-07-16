@@ -44,6 +44,12 @@ use crate::tools::workflow_plan_approval::{
 };
 use crate::utils::spawn_supervised;
 
+/// Keep promoted artifacts compact without clipping ordinary evidence reports.
+/// A 900-character cap cut six-line source receipts in half during live Fleet
+/// acceptance, so downstream roles could not evaluate evidence the host had
+/// already approved.
+const WORKFLOW_HANDOFF_MAX_CHARS: usize = 4_000;
+
 #[derive(Clone)]
 pub struct WorkflowTool {
     manager: SharedSubAgentManager,
@@ -2570,7 +2576,7 @@ fn append_handoff_context(request: &mut TaskRequest, handoffs: &[HandoffArtifact
             artifact.kind,
             artifact.from_role,
             artifact.to_role,
-            compact_handoff_payload(&artifact.payload, 900)
+            compact_handoff_payload(&artifact.payload, WORKFLOW_HANDOFF_MAX_CHARS)
         ));
     }
 }
@@ -3316,6 +3322,25 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use codewhale_workflow::{IsolationMode, leaf_is_write_capable};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn handoff_compaction_preserves_release_sized_evidence() {
+        let payload = format!("APPROVE\n{}\nterminal: RunCompleted", "e".repeat(1_500));
+
+        assert_eq!(
+            compact_handoff_payload(&payload, WORKFLOW_HANDOFF_MAX_CHARS),
+            payload
+        );
+    }
+
+    #[test]
+    fn handoff_compaction_still_caps_oversized_artifacts() {
+        let payload = "e".repeat(WORKFLOW_HANDOFF_MAX_CHARS + 1);
+        let compacted = compact_handoff_payload(&payload, WORKFLOW_HANDOFF_MAX_CHARS);
+
+        assert_eq!(compacted.chars().count(), WORKFLOW_HANDOFF_MAX_CHARS + 3);
+        assert!(compacted.ends_with("..."));
+    }
 
     #[test]
     fn declarative_detection_matches_indented_and_nonleading_workflow_calls() {
