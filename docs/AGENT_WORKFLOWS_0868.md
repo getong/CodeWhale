@@ -9,6 +9,10 @@
 > be re-derived: **Fleet = who · Workflow = what order · Lane = running
 > instance · Runtime = where/how**. The architecture/dogfood issues linked
 > below remain GitHub-tracked work until their acceptance evidence is reviewed.
+> As of 2026-07-15, milestone #53 is closed historical. Do not use this
+> playbook or the `v0868_*` workflows to assign new issues. Current agent-task
+> intake is version-neutral, and maintainers assign the active milestone
+> explicitly (the first post-v0.9.0 roadmap milestone is `v0.9.1`).
 
 This document tells autonomous agents how to systematically complete the v0.8.68
 release. It pairs with:
