@@ -1356,11 +1356,11 @@ impl HookExecutor {
             .envs(env_vars)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(if stdin_bytes.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            });
+            // A closed pipe is a portable EOF signal through shell layers.
+            // Windows cmd/PowerShell can reopen console input when handed
+            // NUL, so Stdio::null() is not sufficient when the parent test or
+            // terminal still owns a live stdin handle.
+            .stdin(Stdio::piped());
 
         let (mut child, process_tree) = match spawn_hook_child(&mut command, &hook.command) {
             Ok(child) => child,
@@ -1485,11 +1485,9 @@ impl HookExecutor {
                 .envs(&env)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .stdin(if stdin_bytes.is_some() {
-                    Stdio::piped()
-                } else {
-                    Stdio::null()
-                });
+                // Drop the write side immediately when there is no payload so
+                // observer hooks receive EOF even through cmd/PowerShell.
+                .stdin(Stdio::piped());
 
             let (mut child, process_tree) = match spawn_hook_child(&mut command, &cmd) {
                 Ok(child) => child,
