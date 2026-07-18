@@ -1895,6 +1895,16 @@ fn run_logout_command(store: &mut ConfigStore) -> Result<()> {
 }
 
 fn run_logout_command_with_secrets(store: &mut ConfigStore, secrets: &Secrets) -> Result<()> {
+    codewhale_config::with_xai_oauth_revocation_transaction(|| {
+        run_logout_command_with_secrets_unlocked(store, secrets)
+    })
+}
+
+fn run_logout_command_with_secrets_unlocked(
+    store: &mut ConfigStore,
+    secrets: &Secrets,
+) -> Result<()> {
+    let original_config = store.config.clone();
     let active_provider = store.config.provider;
     store.config.api_key = None;
     for provider in ProviderKind::ALL {
@@ -1908,11 +1918,12 @@ fn run_logout_command_with_secrets(store: &mut ConfigStore, secrets: &Secrets) -
     let xai = store.config.providers.for_provider_mut(ProviderKind::Xai);
     xai.oauth_credential_generation = None;
     xai.auth_mode = None;
-    clear_provider_api_key_from_keyring(secrets, active_provider);
     store.config.auth_mode = None;
-    store.save()?;
-    codewhale_config::clear_all_xai_oauth_credentials()
-        .context("provider authority was revoked, but owned xAI OAuth cleanup did not complete")?;
+    if let Err(error) = store.save() {
+        store.config = original_config;
+        return Err(error);
+    }
+    clear_provider_api_key_from_keyring(secrets, active_provider);
     println!("logged out");
     Ok(())
 }
@@ -1974,6 +1985,20 @@ fn persist_provider_api_key(
     provider: ProviderKind,
     api_key: &str,
 ) -> Result<bool> {
+    if provider == ProviderKind::Xai {
+        return codewhale_config::with_xai_oauth_revocation_transaction(|| {
+            persist_provider_api_key_unlocked(store, secrets, provider, api_key)
+        });
+    }
+    persist_provider_api_key_unlocked(store, secrets, provider, api_key)
+}
+
+fn persist_provider_api_key_unlocked(
+    store: &mut ConfigStore,
+    secrets: &Secrets,
+    provider: ProviderKind,
+    api_key: &str,
+) -> Result<bool> {
     let original_config = store.config.clone();
     prepare_provider_api_key_metadata(store, provider);
     let slot = provider_slot(provider);
@@ -2026,6 +2051,33 @@ fn persist_provider_api_key(
     }
     codewhale_config::scrub_plaintext_api_keys_from_config_backup(store.path())?;
     Ok(secret_store_saved)
+}
+
+fn clear_auth_provider(
+    store: &mut ConfigStore,
+    secrets: &Secrets,
+    provider: ProviderKind,
+) -> Result<()> {
+    let slot = provider_slot(provider);
+    let original_config = store.config.clone();
+    clear_provider_api_key_from_config(store, provider);
+    if provider == ProviderKind::Xai {
+        let xai = store.config.providers.for_provider_mut(provider);
+        xai.oauth_credential_generation = None;
+        xai.auth_mode = None;
+        xai.external_credentials = None;
+    }
+    if let Err(error) = store.save() {
+        store.config = original_config;
+        return Err(error);
+    }
+    clear_provider_api_key_from_keyring(secrets, provider);
+    if provider == ProviderKind::Xai {
+        println!("cleared xAI credentials from config, secret store, and owned OAuth storage");
+    } else {
+        println!("cleared API key for {slot} from config and secret store");
+    }
+    Ok(())
 }
 
 fn clear_provider_api_key_from_config(store: &mut ConfigStore, provider: ProviderKind) {
@@ -2642,27 +2694,13 @@ fn run_auth_command_with_secrets(
         }
         AuthCommand::Clear { provider } => {
             let provider: ProviderKind = provider.into();
-            let slot = provider_slot(provider);
-            clear_provider_api_key_from_config(store, provider);
             if provider == ProviderKind::Xai {
-                let xai = store.config.providers.for_provider_mut(provider);
-                xai.oauth_credential_generation = None;
-                xai.auth_mode = None;
-                xai.external_credentials = None;
-            }
-            clear_provider_api_key_from_keyring(secrets, provider);
-            store.save()?;
-            if provider == ProviderKind::Xai {
-                codewhale_config::clear_all_xai_oauth_credentials().context(
-                    "xAI provider authority was revoked, but owned OAuth cleanup did not complete",
-                )?;
-                println!(
-                    "cleared xAI credentials from config, secret store, and owned OAuth storage"
-                );
+                codewhale_config::with_xai_oauth_revocation_transaction(|| {
+                    clear_auth_provider(store, secrets, provider)
+                })
             } else {
-                println!("cleared API key for {slot} from config and secret store");
+                clear_auth_provider(store, secrets, provider)
             }
-            Ok(())
         }
         AuthCommand::List => {
             for line in auth_list_lines(store, secrets) {
@@ -5574,7 +5612,14 @@ model = "qwen-2.5-7b"
 
     #[test]
     fn external_consent_persists_exact_scope_and_api_key_or_revoke_disables_it() {
+        let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("codewhale-home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
         let config_path = dir.path().join("config.toml");
         let external_path = dir.path().join("grok-auth.json");
         let external_raw = r#"{"secret":"must-never-be-read-or-written"}"#;
@@ -5803,8 +5848,15 @@ model = "qwen-2.5-7b"
 
     #[test]
     fn api_key_config_failure_restores_absent_and_existing_secret_state() {
+        let _lock = env_lock();
         for prior in [None, Some("prior-xai-key")] {
             let dir = tempfile::TempDir::new().expect("tempdir");
+            let home = dir
+                .path()
+                .canonicalize()
+                .expect("canonical temp root")
+                .join("codewhale-home");
+            let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
             let config_path = dir.path().join("config.toml");
             let mut store = ConfigStore::load(Some(config_path.clone())).expect("load store");
             store.config.providers.xai.auth_mode = Some("oauth".to_string());
@@ -5929,7 +5981,11 @@ model = "qwen-2.5-7b"
     fn logout_removes_plaintext_provider_keys() {
         let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let home = dir.path().join("codewhale-home");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("codewhale-home");
         let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
         let path = home.join("config.toml");
         let mut store = ConfigStore::load(Some(path.clone())).expect("store should load");

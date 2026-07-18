@@ -8398,6 +8398,19 @@ pub(crate) fn save_api_key_for_identity(
     route_config: &Config,
     api_key: &str,
 ) -> Result<PathBuf> {
+    if identity.provider == ApiProvider::Xai {
+        return codewhale_config::with_xai_oauth_revocation_transaction(|| {
+            save_api_key_for_identity_unlocked(identity, route_config, api_key)
+        });
+    }
+    save_api_key_for_identity_unlocked(identity, route_config, api_key)
+}
+
+fn save_api_key_for_identity_unlocked(
+    identity: &ProviderIdentity,
+    route_config: &Config,
+    api_key: &str,
+) -> Result<PathBuf> {
     let provider = identity.provider;
     if provider == ApiProvider::OpenaiCodex {
         anyhow::bail!(
@@ -8865,6 +8878,10 @@ fn missing_provider_api_key_message(provider: ApiProvider) -> Result<String> {
 /// (Path 0) ensures a freshly-entered key still wins over a stale env
 /// var that lingers from a previous session.
 pub fn clear_api_key() -> Result<()> {
+    codewhale_config::with_xai_oauth_revocation_transaction(clear_api_key_unlocked)
+}
+
+fn clear_api_key_unlocked() -> Result<()> {
     // Strip api_key entries from config.toml, including provider-scoped
     // nested entries. Clearing a config file must not trigger platform
     // credential prompts.
@@ -8872,8 +8889,6 @@ pub fn clear_api_key() -> Result<()> {
         .context("Failed to resolve config path: home directory not found.")?;
 
     if !config_path.exists() {
-        codewhale_config::clear_all_xai_oauth_credentials()
-            .context("config was absent, but owned xAI OAuth cleanup did not complete")?;
         return Ok(());
     }
 
@@ -8891,9 +8906,6 @@ pub fn clear_api_key() -> Result<()> {
         Ok(())
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
-    codewhale_config::clear_all_xai_oauth_credentials().context(
-        "credential authority was revoked, but owned xAI OAuth cleanup did not complete",
-    )?;
     log_sensitive_event(
         "credential.clear",
         json!({
@@ -8911,14 +8923,19 @@ pub fn clear_api_key() -> Result<()> {
 /// removes only the key for the specified provider section (plus the
 /// legacy root `api_key` when the provider is DeepSeek).
 pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
+    if provider == ApiProvider::Xai.as_str() {
+        return codewhale_config::with_xai_oauth_revocation_transaction(|| {
+            clear_active_provider_api_key_unlocked(provider)
+        });
+    }
+    clear_active_provider_api_key_unlocked(provider)
+}
+
+fn clear_active_provider_api_key_unlocked(provider: &str) -> Result<()> {
     let config_path = default_config_path()
         .context("Failed to resolve config path: home directory not found.")?;
 
     if !config_path.exists() {
-        if provider == ApiProvider::Xai.as_str() {
-            codewhale_config::clear_all_xai_oauth_credentials()
-                .context("config was absent, but owned xAI OAuth cleanup did not complete")?;
-        }
         return Ok(());
     }
 
@@ -8975,11 +8992,6 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
         Ok(())
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
-    if provider == ApiProvider::Xai.as_str() {
-        codewhale_config::clear_all_xai_oauth_credentials().context(
-            "xAI provider authority was revoked, but owned OAuth cleanup did not complete",
-        )?;
-    }
     log_sensitive_event(
         "credential.clear",
         json!({

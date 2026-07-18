@@ -2503,13 +2503,17 @@ fn provider_api_key_config_failure_restores_secret_and_keeps_external_route() ->
     for prior in [None, Some("prior-xai-secret")] {
         let temp_root = tempfile::tempdir()?;
         let _guard = EnvGuard::new(temp_root.path());
-        let codewhale_home = temp_root.path().join("codewhale-home");
+        let codewhale_home = temp_root.path().canonicalize()?.join("codewhale-home");
         fs::create_dir_all(&codewhale_home)?;
         let config_path = codewhale_home.join("config.toml");
         fs::create_dir(&config_path)?;
         let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
         let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
         let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let generation = "xai-auth-0123456789abcdef0123456789abcdef.json";
+        codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+            store.write(generation, b"prior-owned-epoch", false)
+        })?;
         let secrets = codewhale_secrets::Secrets::auto_detect();
         if let Some(prior) = prior {
             secrets.set("xai", prior)?;
@@ -2520,6 +2524,7 @@ fn provider_api_key_config_failure_restores_secret_and_keeps_external_route() ->
             providers: Some(ProvidersConfig {
                 xai: ProviderConfig {
                     auth_mode: Some("oauth".to_string()),
+                    oauth_credential_generation: Some(generation.to_string()),
                     external_credentials: Some(
                         codewhale_config::ExternalCredentialConsentToml::read_only(
                             codewhale_config::ProviderKind::Xai,
@@ -2548,6 +2553,11 @@ fn provider_api_key_config_failure_restores_secret_and_keeps_external_route() ->
         assert_eq!(xai.auth_mode.as_deref(), Some("oauth"));
         assert!(xai.external_credentials.is_some());
         assert!(config_path.is_dir());
+        assert_eq!(
+            fs::read(codewhale_home.join("credentials").join(generation))?,
+            b"prior-owned-epoch",
+            "failed API-key mode switch must restore the prior OAuth epoch"
+        );
     }
     Ok(())
 }
@@ -2847,6 +2857,7 @@ fn clear_api_key_strips_root_and_provider_scoped_keys() -> Result<()> {
         nanos
     ));
     fs::create_dir_all(&temp_root)?;
+    let temp_root = temp_root.canonicalize()?;
     let _guard = EnvGuard::new(&temp_root);
 
     let config_dir = temp_root.join(".deepseek");
@@ -3055,6 +3066,7 @@ fn clear_api_key_preserves_comments_and_unrelated_keys() -> Result<()> {
         nanos
     ));
     fs::create_dir_all(&temp_root)?;
+    let temp_root = temp_root.canonicalize()?;
     let _guard = EnvGuard::new(&temp_root);
 
     let config_path = temp_root.join(".deepseek").join("config.toml");

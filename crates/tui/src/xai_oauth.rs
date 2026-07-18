@@ -14,6 +14,7 @@
 //! logged.
 
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -331,16 +332,44 @@ pub fn get_credentials(config: &Config) -> Result<XaiOAuthCredentials> {
 }
 
 fn get_owned_credentials(path: &Path) -> Result<XaiOAuthCredentials> {
-    let mut file = load_owned_auth_file(path)?.ok_or_else(|| {
+    let directory = codewhale_config::xai_oauth_credentials_dir()?;
+    anyhow::ensure!(
+        path.parent() == Some(directory.as_path()),
+        "Codewhale-owned xAI OAuth path escaped the credentials directory"
+    );
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Codewhale-owned xAI OAuth path must have a UTF-8 basename")?;
+    anyhow::ensure!(
+        name == codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME
+            || codewhale_config::is_valid_xai_oauth_generation(name),
+        "Codewhale-owned xAI OAuth path has an invalid basename"
+    );
+    codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+        get_owned_credentials_locked(store, name, refresh_access_token)
+    })
+}
+
+fn get_owned_credentials_locked<F>(
+    store: &codewhale_config::XaiOAuthCredentialStore,
+    name: &str,
+    refresh_access: F,
+) -> Result<XaiOAuthCredentials>
+where
+    F: FnOnce(&str, &str, &str) -> Result<TokenResponse>,
+{
+    let path = store.path_for(name)?;
+    let mut file = load_owned_auth_file_from_store(store, name)?.ok_or_else(|| {
         anyhow::anyhow!(
             "Codewhale-owned xAI OAuth credentials were not found at {}. Run `codewhale auth xai-device` again.",
-            codewhale_config::quote_os_path(path)
+            codewhale_config::quote_os_path(&path)
         )
     })?;
     let (scope, mut entry) = select_entry(&mut file).ok_or_else(|| {
         anyhow::anyhow!(
             "Codewhale-owned xAI OAuth credentials at {} have no usable entry. Run `codewhale auth xai-device` again.",
-            codewhale_config::quote_os_path(path)
+            codewhale_config::quote_os_path(&path)
         )
     })?;
 
@@ -372,10 +401,10 @@ fn get_owned_credentials(path: &Path) -> Result<XaiOAuthCredentials> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| client_id_from_scope(&scope));
 
-    let refreshed = refresh_access_token(&issuer, &client_id, refresh)?;
+    let refreshed = refresh_access(&issuer, &client_id, refresh)?;
     apply_token_response(&mut entry, &issuer, &client_id, &refreshed)?;
     file.insert(scope.clone(), entry.clone());
-    write_auth_file(path, &file)?;
+    write_auth_file_to_store(store, name, &file, true)?;
 
     let token = entry
         .key
@@ -490,6 +519,17 @@ pub fn activate_device_login(
     config_path: Option<&Path>,
     live_config: Option<&mut Config>,
 ) -> Result<XaiDeviceActivation> {
+    codewhale_config::with_xai_oauth_lifecycle_lock(move |store| {
+        activate_device_login_locked(pending, config_path, live_config, store)
+    })
+}
+
+fn activate_device_login_locked(
+    pending: PendingXaiDeviceLogin,
+    config_path: Option<&Path>,
+    live_config: Option<&mut Config>,
+    store: &codewhale_config::XaiOAuthCredentialStore,
+) -> Result<XaiDeviceActivation> {
     let config_path = crate::config_persistence::config_toml_path(config_path)?;
     let generation = format!(
         "{}{}{}",
@@ -498,7 +538,7 @@ pub fn activate_device_login(
         codewhale_config::XAI_OAUTH_GENERATION_SUFFIX
     );
     codewhale_config::validate_xai_oauth_generation(&generation)?;
-    let auth_path = codewhale_config::xai_oauth_generation_path(&generation)?;
+    let auth_path = store.path_for(&generation)?;
     let key_inside =
         crate::config::provider_config_key(ApiProvider::Xai).context("xAI auth mode key")?;
     let mut stage_written = false;
@@ -525,18 +565,22 @@ pub fn activate_device_login(
             })?;
         }
 
-        let previous_path = match previous_generation.as_deref() {
-            Some(previous) => Some(codewhale_config::xai_oauth_generation_path(previous)?),
-            None => {
-                let legacy = codewhale_auth_file_path()?;
-                load_owned_auth_file(&legacy)?.is_some().then_some(legacy)
+        let previous_owned_name = match previous_generation.as_deref() {
+            Some(previous) => Some(previous.to_string()),
+            None if store
+                .read_to_string(codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME)?
+                .is_some() =>
+            {
+                Some(codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME.to_string())
             }
+            None => None,
         };
-        let mut file = match previous_path.as_deref() {
-            Some(path) => load_owned_auth_file(path)?.ok_or_else(|| {
+        let mut file = match previous_owned_name.as_deref() {
+            Some(name) => load_owned_auth_file_from_store(store, name)?.ok_or_else(|| {
+                let path = store.directory().join(name);
                 anyhow::anyhow!(
                     "the active Codewhale-owned xAI OAuth generation is missing at {}",
-                    codewhale_config::quote_os_path(path)
+                    codewhale_config::quote_os_path(&path)
                 )
             })?,
             None => BTreeMap::new(),
@@ -563,7 +607,7 @@ pub fn activate_device_login(
             .filter(|token| !token.trim().is_empty())
             .context("xAI device-code login returned an empty access token")?;
         file.insert(scope.clone(), entry.clone());
-        write_new_auth_file(&auth_path, &file)?;
+        write_auth_file_to_store(store, &generation, &file, false)?;
         stage_written = true;
 
         codewhale_config::set_config_document_value(
@@ -581,18 +625,15 @@ pub fn activate_device_login(
             &["providers", key_inside, "external_credentials"],
         )?;
         Ok((
-            previous_generation,
+            previous_owned_name,
             credentials_from_entry(scope, &entry, access),
         ))
     });
 
-    let (previous_generation, credentials) = match activation {
+    let (previous_owned_name, credentials) = match activation {
         Ok(activation) => activation,
         Err(error) => {
-            if stage_written
-                && let Err(cleanup_error) = fs::remove_file(&auth_path)
-                && cleanup_error.kind() != std::io::ErrorKind::NotFound
-            {
+            if stage_written && let Err(cleanup_error) = store.remove(&generation) {
                 return Err(error).context(format!(
                     "xAI login was not activated; also failed to remove unreferenced staged credentials at {}: {cleanup_error}",
                     codewhale_config::quote_os_path(&auth_path)
@@ -606,9 +647,9 @@ pub fn activate_device_login(
     if let Some(config) = live_config {
         config.mark_codewhale_owned_xai_oauth(generation.clone());
     }
-    if let Some(previous) = previous_generation
+    if let Some(previous) = previous_owned_name
         && previous != generation
-        && let Err(error) = codewhale_config::remove_xai_oauth_generation(&previous)
+        && let Err(error) = store.remove(&previous)
     {
         tracing::warn!(
             target: "codewhale::xai_oauth",
@@ -646,22 +687,20 @@ pub fn missing_auth_message() -> String {
 type AuthFile = BTreeMap<String, GrokAuthEntry>;
 
 fn load_owned_auth_file(path: &Path) -> Result<Option<AuthFile>> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "inspecting Codewhale-owned credential file {}",
-                    codewhale_config::quote_os_path(path)
-                )
-            });
-        }
-    }
     let Some(raw) = crate::external_credentials::read_codewhale_owned_to_string(path)? else {
         return Ok(None);
     };
     parse_auth_file(&raw, path).map(Some)
+}
+
+fn load_owned_auth_file_from_store(
+    store: &codewhale_config::XaiOAuthCredentialStore,
+    name: &str,
+) -> Result<Option<AuthFile>> {
+    let Some(raw) = store.read_to_string(name)? else {
+        return Ok(None);
+    };
+    parse_auth_file(&raw, &store.path_for(name)?).map(Some)
 }
 
 fn load_external_auth_file(
@@ -706,159 +745,24 @@ fn parse_auth_file(raw: &str, path: &Path) -> Result<AuthFile> {
     Ok(out)
 }
 
-fn write_auth_file(path: &Path, file: &AuthFile) -> Result<()> {
-    write_auth_file_with_policy(path, file, true)
-}
-
-fn write_new_auth_file(path: &Path, file: &AuthFile) -> Result<()> {
-    write_auth_file_with_policy(path, file, false)
-}
-
-fn write_auth_file_with_policy(path: &Path, file: &AuthFile, allow_replace: bool) -> Result<()> {
-    ensure_owned_auth_destination(path, allow_replace)?;
+fn write_auth_file_to_store(
+    store: &codewhale_config::XaiOAuthCredentialStore,
+    name: &str,
+    file: &AuthFile,
+    allow_replace: bool,
+) -> Result<()> {
     let serialized =
         serde_json::to_vec_pretty(file).context("serializing xAI OAuth credentials")?;
-    codewhale_config::persistence::atomic_write(path, &serialized).with_context(|| {
-        format!(
-            "writing xAI OAuth credentials to {}",
-            codewhale_config::quote_os_path(path)
-        )
-    })?;
-    #[cfg(unix)]
-    let secure_result = {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+    store
+        .write(name, &serialized, allow_replace)
+        .with_context(|| {
             format!(
-                "securing xAI OAuth credentials at {}",
-                codewhale_config::quote_os_path(path)
-            )
-        })
-    };
-    #[cfg(windows)]
-    let secure_result = crate::external_credentials::secure_codewhale_owned_windows_path(
-        path, false,
-    )
-    .with_context(|| {
-        format!(
-            "securing xAI OAuth credentials at {}",
-            codewhale_config::quote_os_path(path)
-        )
-    });
-    #[cfg(not(any(unix, windows)))]
-    let secure_result: Result<()> = Ok(());
-    if let Err(error) = secure_result {
-        if !allow_replace {
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {}
-                Err(cleanup) => {
-                    return Err(error).context(format!(
-                        "also failed to remove unsecured staged credentials at {}: {cleanup}",
-                        codewhale_config::quote_os_path(path)
-                    ));
-                }
-            }
-        }
-        return Err(error);
-    }
-    #[cfg(test)]
-    crate::external_credentials::record_owned_credential_write();
-    Ok(())
-}
-
-fn ensure_owned_auth_destination(path: &Path, allow_replace: bool) -> Result<()> {
-    let directory = codewhale_config::xai_oauth_credentials_dir()?;
-    anyhow::ensure!(
-        path.parent() == Some(directory.as_path()),
-        "xAI OAuth destination must be inside Codewhale's credentials directory"
-    );
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("xAI OAuth destination must have a UTF-8 basename")?;
-    anyhow::ensure!(
-        file_name == codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME
-            || codewhale_config::is_valid_xai_oauth_generation(file_name),
-        "xAI OAuth destination has an invalid owned basename"
-    );
-    fs::create_dir_all(&directory).with_context(|| {
-        format!(
-            "creating Codewhale credentials directory {}",
-            codewhale_config::quote_os_path(&directory)
-        )
-    })?;
-    let canonical_directory = fs::canonicalize(&directory).with_context(|| {
-        format!(
-            "resolving Codewhale credentials directory {}",
-            codewhale_config::quote_os_path(&directory)
-        )
-    })?;
-    anyhow::ensure!(
-        canonical_directory == directory,
-        "Codewhale credentials directory changed through a symlink or reparse point"
-    );
-    let metadata = fs::symlink_metadata(&directory).with_context(|| {
-        format!(
-            "inspecting Codewhale credentials directory {}",
-            codewhale_config::quote_os_path(&directory)
-        )
-    })?;
-    anyhow::ensure!(
-        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
-        "Codewhale credentials directory must be a non-symlink directory"
-    );
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-        anyhow::ensure!(
-            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-            "Codewhale credentials directory must not be a reparse point"
-        );
-        crate::external_credentials::secure_codewhale_owned_windows_path(&directory, true)
-            .with_context(|| {
-                format!(
-                    "securing Codewhale credentials directory {}",
-                    codewhale_config::quote_os_path(&directory)
-                )
-            })?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        anyhow::ensure!(
-            metadata.uid() == unsafe { libc::geteuid() },
-            "Codewhale credentials directory must be owned by the current user"
-        );
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).with_context(|| {
-            format!(
-                "securing Codewhale credentials directory {}",
-                codewhale_config::quote_os_path(&directory)
+                "writing xAI OAuth credentials to {}",
+                codewhale_config::quote_os_path(&store.directory().join(name))
             )
         })?;
-    }
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                allow_replace,
-                "refusing to replace an existing xAI OAuth generation"
-            );
-            anyhow::ensure!(
-                metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
-                "xAI OAuth destination must be a non-symlink regular file"
-            );
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt as _;
-                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-                anyhow::ensure!(
-                    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-                    "xAI OAuth destination must not be a reparse point"
-                );
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("inspecting xAI OAuth destination"),
-    }
+    #[cfg(test)]
+    crate::external_credentials::record_owned_credential_write();
     Ok(())
 }
 
@@ -1335,7 +1239,7 @@ fn rfc3339_from_unix(ts: i64) -> String {
         .unwrap_or_else(|| format!("{ts}"))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt;
 
 #[cfg(test)]
@@ -1419,7 +1323,8 @@ mod tests {
     fn disabled_external_grok_credentials_cause_zero_external_io() {
         let _guard = crate::test_support::lock_test_env();
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("external-grok-auth.json");
+        let root = dir.path().canonicalize().expect("canonical temp root");
+        let path = root.join("external-grok-auth.json");
         let raw = serde_json::json!({
             format!("{XAI_OIDC_ISSUER}::{GROK_OIDC_CLIENT_ID}"): {
                 "key": "must-never-be-read",
@@ -1430,7 +1335,8 @@ mod tests {
         })
         .to_string();
         fs::write(&path, &raw).unwrap();
-        let _home_guard = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let owned_home = root.join("codewhale-owned");
+        let _home_guard = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &owned_home);
         let _path_guard = crate::test_support::EnvVarGuard::set("GROK_AUTH_PATH", &path);
         let config = Config {
             provider: Some(ApiProvider::Xai.as_str().to_string()),
@@ -1540,13 +1446,7 @@ mod tests {
         let _grok = crate::test_support::EnvVarGuard::set("GROK_AUTH_PATH", &grok_path);
 
         let owned = codewhale_auth_file_path().expect("Codewhale-owned auth path");
-        assert_eq!(
-            owned,
-            dir.path()
-                .canonicalize()
-                .expect("canonical Codewhale home")
-                .join("credentials/xai-auth.json")
-        );
+        assert_eq!(owned, dir.path().join("credentials/xai-auth.json"));
         assert_ne!(owned, auth_file_path());
     }
 
@@ -1563,11 +1463,205 @@ mod tests {
         }
     }
 
+    fn seed_expired_owned_generation() -> String {
+        let generation = "xai-auth-0123456789abcdef0123456789abcdef.json".to_string();
+        codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+            let scope = format!("{}::{}", XAI_OIDC_ISSUER, GROK_OIDC_CLIENT_ID);
+            let mut file = AuthFile::new();
+            file.insert(
+                scope,
+                GrokAuthEntry {
+                    key: Some("expired-access".to_string()),
+                    refresh_token: Some("initial-refresh".to_string()),
+                    expires_at: Some("1970-01-01T00:00:00.000Z".to_string()),
+                    oidc_issuer: Some(XAI_OIDC_ISSUER.to_string()),
+                    oidc_client_id: Some(GROK_OIDC_CLIENT_ID.to_string()),
+                    auth_mode: Some("oidc".to_string()),
+                    extra: BTreeMap::new(),
+                },
+            );
+            write_auth_file_to_store(store, &generation, &file, false)
+        })
+        .expect("seed expired owned generation");
+        generation
+    }
+
+    fn seed_legacy_owned_credentials() -> PathBuf {
+        codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+            let scope = format!("{}::{}", XAI_OIDC_ISSUER, GROK_OIDC_CLIENT_ID);
+            let mut legacy = AuthFile::new();
+            legacy.insert(
+                scope,
+                GrokAuthEntry {
+                    key: Some("legacy-access".to_string()),
+                    refresh_token: Some("legacy-refresh".to_string()),
+                    expires_at: Some(rfc3339_from_now(3600)),
+                    oidc_issuer: Some(XAI_OIDC_ISSUER.to_string()),
+                    oidc_client_id: Some(GROK_OIDC_CLIENT_ID.to_string()),
+                    auth_mode: Some("oidc".to_string()),
+                    extra: BTreeMap::new(),
+                },
+            );
+            write_auth_file_to_store(
+                store,
+                codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME,
+                &legacy,
+                false,
+            )?;
+            store.path_for(codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME)
+        })
+        .expect("seed legacy credentials")
+    }
+
+    #[test]
+    fn concurrent_refreshes_share_one_rotated_epoch() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let generation = seed_expired_owned_generation();
+        let refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let first_generation = generation.clone();
+        let first_refreshes = refreshes.clone();
+        let first = std::thread::spawn(move || {
+            codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+                get_owned_credentials_locked(store, &first_generation, |_, _, refresh| {
+                    assert_eq!(refresh, "initial-refresh");
+                    first_refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(TokenResponse {
+                        access_token: Some("rotated-access".to_string()),
+                        refresh_token: Some("rotated-refresh".to_string()),
+                        expires_in: Some(3600),
+                        error: None,
+                    })
+                })
+            })
+        });
+        entered_rx.recv().expect("first refresh reached barrier");
+
+        let second_generation = generation.clone();
+        let second_refreshes = refreshes.clone();
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+                get_owned_credentials_locked(store, &second_generation, |_, _, _| {
+                    second_refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    bail!("second refresh must observe the first thread's committed token")
+                })
+            })
+        });
+        attempt_rx.recv().expect("second refresh attempted lock");
+        release_tx.send(()).expect("release first refresh");
+
+        let first = first.join().unwrap().expect("first refresh");
+        let second = second.join().unwrap().expect("second refresh");
+        assert_eq!(first.access_token, "rotated-access");
+        assert_eq!(second.access_token, "rotated-access");
+        assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+            let mut file = load_owned_auth_file_from_store(store, &generation)?
+                .context("generation must remain active")?;
+            let (_, entry) = select_entry(&mut file).context("stored entry")?;
+            assert_eq!(entry.refresh_token.as_deref(), Some("rotated-refresh"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn logout_waits_for_refresh_then_revokes_the_committed_epoch() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let generation = seed_expired_owned_generation();
+        fs::write(
+            home.join("config.toml"),
+            format!(
+                "[providers.xai]\nauth_mode = \"oauth\"\noauth_credential_generation = \"{generation}\"\n"
+            ),
+        )
+        .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let refresh_generation = generation.clone();
+        let refresh = std::thread::spawn(move || {
+            codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+                get_owned_credentials_locked(store, &refresh_generation, |_, _, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(TokenResponse {
+                        access_token: Some("last-refresh-access".to_string()),
+                        refresh_token: Some("last-refresh-rotation".to_string()),
+                        expires_in: Some(3600),
+                        error: None,
+                    })
+                })
+            })
+        });
+        entered_rx.recv().expect("refresh reached barrier");
+
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let config_path = home.join("config.toml");
+        let logout = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            codewhale_config::with_xai_oauth_revocation_transaction(|| {
+                codewhale_config::mutate_config_document(&config_path, |document| {
+                    codewhale_config::unset_config_document_value(
+                        document,
+                        &["providers", "xai", "oauth_credential_generation"],
+                    )?;
+                    codewhale_config::unset_config_document_value(
+                        document,
+                        &["providers", "xai", "auth_mode"],
+                    )?;
+                    Ok(())
+                })
+            })
+        });
+        attempt_rx.recv().expect("logout attempted lifecycle lock");
+        release_tx.send(()).expect("release refresh");
+
+        assert_eq!(
+            refresh.join().unwrap().expect("refresh").access_token,
+            "last-refresh-access"
+        );
+        logout.join().unwrap().expect("logout");
+        let auth_path = home.join("credentials").join(&generation);
+        assert!(
+            !auth_path.exists(),
+            "logout must retire the generation written by the preceding refresh"
+        );
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(!config.contains("oauth_credential_generation"));
+        assert!(!config.contains("auth_mode"));
+    }
+
     #[test]
     fn activation_commits_unique_generation_pointer_and_revokes_external_consent() {
         let _guard = crate::test_support::lock_test_env();
         let dir = TempDir::new().unwrap();
-        let home = dir.path().join("owned-home");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
         let config_path = dir.path().join("config.toml");
         let external_path = dir.path().join("grok-external.json");
         fs::write(&external_path, "external owner bytes").unwrap();
@@ -1661,10 +1755,45 @@ consent_version = 1
     }
 
     #[test]
+    fn activation_retires_legacy_owned_file_only_after_config_commit() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "[providers.xai]\nmodel = \"grok-4.5\"\n").unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let legacy_path = seed_legacy_owned_credentials();
+        assert!(legacy_path.exists());
+
+        let activation = activate_device_login(
+            pending_login("new-access", "new-refresh"),
+            Some(&config_path),
+            None,
+        )
+        .expect("activate replacement generation");
+
+        assert!(activation.auth_path.exists());
+        assert!(
+            !legacy_path.exists(),
+            "legacy duplicate must be removed after the generation pointer commits"
+        );
+        let persisted = fs::read_to_string(config_path).unwrap();
+        assert!(persisted.contains(activation.auth_path.file_name().unwrap().to_str().unwrap()));
+    }
+
+    #[test]
     fn activation_rotation_cleans_only_the_superseded_generation_after_commit() {
         let _guard = crate::test_support::lock_test_env();
         let dir = TempDir::new().unwrap();
-        let home = dir.path().join("owned-home");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
         let config_path = dir.path().join("config.toml");
         fs::write(&config_path, "[providers.xai]\nmodel = \"grok-4.5\"\n").unwrap();
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
@@ -1711,7 +1840,11 @@ consent_version = 1
     fn activation_rejects_a_non_string_generation_pointer_without_staging_credentials() {
         let _guard = crate::test_support::lock_test_env();
         let dir = TempDir::new().unwrap();
-        let home = dir.path().join("owned-home");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
         let config_path = dir.path().join("config.toml");
         let original = "[providers.xai]\noauth_credential_generation = { path = \"attacker\" }\n";
         fs::write(&config_path, original).unwrap();
@@ -1725,7 +1858,14 @@ consent_version = 1
         .expect_err("non-string generation pointers must fail closed");
         assert!(error.to_string().contains("not activated"), "{error:#}");
         assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
-        assert!(!home.join("credentials").exists());
+        let credentials = home.join("credentials");
+        assert!(credentials.exists(), "lifecycle lock directory is durable");
+        assert!(fs::read_dir(credentials).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            name != codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME
+                && !codewhale_config::is_valid_xai_oauth_generation(&name)
+        }));
     }
 
     #[cfg(unix)]
@@ -1733,7 +1873,11 @@ consent_version = 1
     fn activation_failure_cleans_unreferenced_stage_and_keeps_live_config_inert() {
         let _guard = crate::test_support::lock_test_env();
         let dir = TempDir::new().unwrap();
-        let home = dir.path().join("owned-home");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
         let config_dir = dir.path().join("config-parent");
         fs::create_dir(&config_dir).unwrap();
         let config_path = config_dir.join("config.toml");
@@ -1741,6 +1885,8 @@ consent_version = 1
         fs::write(config_dir.join("config.toml.lock"), "").unwrap();
         fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o500)).unwrap();
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let legacy_path = seed_legacy_owned_credentials();
+        let legacy_before = fs::read(&legacy_path).unwrap();
         let mut live = Config {
             providers: Some(crate::config::ProvidersConfig {
                 xai: crate::config::ProviderConfig {
@@ -1764,11 +1910,21 @@ consent_version = 1
         let live_xai = live.provider_config_for(ApiProvider::Xai).unwrap();
         assert_eq!(live_xai.auth_mode.as_deref(), Some("api_key"));
         assert!(live_xai.oauth_credential_generation.is_none());
+        assert_eq!(
+            fs::read(&legacy_path).unwrap(),
+            legacy_before,
+            "legacy owned credentials must remain byte-identical until activation commits"
+        );
         let credentials = home.join("credentials");
         if credentials.exists() {
             assert!(
-                fs::read_dir(credentials).unwrap().next().is_none(),
-                "failed activation must remove every unreferenced generation"
+                fs::read_dir(credentials).unwrap().all(|entry| {
+                    let name = entry.unwrap().file_name();
+                    let name = name.to_string_lossy();
+                    name == codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME
+                        || !codewhale_config::is_valid_xai_oauth_generation(&name)
+                }),
+                "failed activation must remove every unreferenced generation but retain legacy"
             );
         }
         assert!(

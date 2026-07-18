@@ -228,10 +228,13 @@ fn open_secure_regular_file(path: &Path, require_owner_only: bool) -> io::Result
     }
     if require_owner_only {
         use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+            || metadata.nlink() != 1
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "Codewhale-owned credential file must be owned by this user with mode 0600 or stricter",
+                "Codewhale-owned credential file must be singly linked, owned by this user, and mode 0600 or stricter",
             ));
         }
     }
@@ -308,6 +311,21 @@ fn open_secure_regular_file(path: &Path, require_owner_only: bool) -> io::Result
         ));
     }
     if require_owner_only {
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the opened credential handle and output pointer remain valid
+        // for the duration of the call.
+        if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if information.nNumberOfLinks != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Codewhale-owned credential file must be singly linked",
+            ));
+        }
         verify_windows_owner_only_handle(handle)?;
     }
     Ok(file)
@@ -332,7 +350,7 @@ fn normalize_windows_path_for_comparison(path: &Path) -> io::Result<String> {
     Ok(normalized_prefix
         .replace('/', "\\")
         .trim_end_matches('\\')
-        .to_string())
+        .to_lowercase())
 }
 
 /// Apply a protected DACL granting only the current Windows user full access.
@@ -772,6 +790,14 @@ mod tests {
             Some("owned-secret")
         );
 
+        let hardlink = root.join("owned-hardlink.json");
+        std::fs::hard_link(&path, &hardlink).expect("hardlink fixture");
+        assert!(
+            read_codewhale_owned_to_string(&path).is_err(),
+            "owned reads must reject multiply-linked files"
+        );
+        std::fs::remove_file(hardlink).expect("remove hardlink fixture");
+
         let link = root.join("owned-link.json");
         symlink(&path, &link).expect("symlink");
         assert!(read_codewhale_owned_to_string(&link).is_err());
@@ -813,6 +839,14 @@ mod tests {
             Some("owned-secret")
         );
 
+        let hardlink = dir.path().join("owned-hardlink.json");
+        std::fs::hard_link(&path, &hardlink).expect("hardlink fixture");
+        assert!(
+            read_codewhale_owned_to_string(&path).is_err(),
+            "owned reads must reject multiply-linked files"
+        );
+        std::fs::remove_file(hardlink).expect("remove hardlink fixture");
+
         let file = File::options()
             .write(true)
             .open(&path)
@@ -843,12 +877,12 @@ mod tests {
             normalize_windows_path_for_comparison(&expected).unwrap(),
             normalize_windows_path_for_comparison(&kernel).unwrap()
         );
-        assert_ne!(
+        assert_eq!(
             normalize_windows_path_for_comparison(Path::new(r"C:\Users\Alice\A\credential.json"))
                 .unwrap(),
             normalize_windows_path_for_comparison(Path::new(r"C:\Users\Alice\a\credential.json"))
                 .unwrap(),
-            "case-distinct paths must never collapse at an exact-path authority boundary"
+            "Windows credential path identity must compare case-insensitively"
         );
 
         let invalid = PathBuf::from(OsString::from_wide(&[

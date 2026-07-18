@@ -262,7 +262,7 @@ fn normalize_windows_path_for_comparison(path: &Path) -> Result<String> {
     Ok(normalized_prefix
         .replace('/', "\\")
         .trim_end_matches('\\')
-        .to_string())
+        .to_lowercase())
 }
 
 fn prepare_config_path(path: &Path) -> Result<PathBuf> {
@@ -446,12 +446,12 @@ mod tests {
             0xd800,
         ]));
         assert!(normalize_windows_path_for_comparison(&invalid).is_err());
-        assert_ne!(
+        assert_eq!(
             normalize_windows_path_for_comparison(Path::new(r"C:\Config\A\config.toml.lock"))
                 .unwrap(),
             normalize_windows_path_for_comparison(Path::new(r"C:\Config\a\config.toml.lock"))
                 .unwrap(),
-            "case-distinct lock paths must not collapse"
+            "Windows lock identity must compare case-insensitively"
         );
     }
 
