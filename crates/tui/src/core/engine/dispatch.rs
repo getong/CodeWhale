@@ -18,7 +18,7 @@
 use serde_json::json;
 
 use crate::models::{Tool, ToolCaller};
-use crate::tools::spec::{ToolError, ToolResult};
+use crate::tools::spec::{ResourceClaim, ToolError, ToolResult};
 use crate::tui::app::AppMode;
 
 use super::ToolUseState;
@@ -49,6 +49,7 @@ pub(super) struct ToolExecutionPlan {
     pub(super) supports_parallel: bool,
     pub(super) read_only: bool,
     pub(super) detached_start: bool,
+    pub(super) resources: Vec<ResourceClaim>,
     pub(super) blocked_error: Option<ToolError>,
     pub(super) guard_result: Option<ToolResult>,
 }
@@ -495,7 +496,13 @@ pub(super) fn parse_parallel_tool_calls(
 
 #[cfg(test)]
 pub(super) fn should_parallelize_tool_batch(plans: &[ToolExecutionPlan]) -> bool {
-    !plans.is_empty() && plans.iter().all(tool_plan_can_join_parallel_batch)
+    !plans.is_empty()
+        && plans.iter().all(tool_plan_can_join_parallel_batch)
+        && plans.iter().enumerate().all(|(index, plan)| {
+            plans[index + 1..]
+                .iter()
+                .all(|other| !tool_plans_conflict(plan, other))
+        })
 }
 
 pub(super) fn tool_plan_is_parallel_safe(plan: &ToolExecutionPlan) -> bool {
@@ -508,6 +515,17 @@ pub(super) fn tool_plan_can_join_parallel_batch(plan: &ToolExecutionPlan) -> boo
             || (plan.detached_start && !plan.approval_required && !plan.interactive))
 }
 
+pub(super) fn tool_plans_conflict(left: &ToolExecutionPlan, right: &ToolExecutionPlan) -> bool {
+    left.resources.contains(&ResourceClaim::GlobalExclusive)
+        || right.resources.contains(&ResourceClaim::GlobalExclusive)
+        || left.resources.iter().any(|left_claim| {
+            right
+                .resources
+                .iter()
+                .any(|right_claim| left_claim.conflicts_with(right_claim))
+        })
+}
+
 pub(super) fn plan_tool_execution_batches(
     plans: Vec<ToolExecutionPlan>,
 ) -> Vec<ToolExecutionBatch> {
@@ -516,6 +534,14 @@ pub(super) fn plan_tool_execution_batches(
 
     for plan in plans {
         if tool_plan_can_join_parallel_batch(&plan) {
+            if parallel_chunk
+                .iter()
+                .any(|existing| tool_plans_conflict(existing, &plan))
+            {
+                batches.push(ToolExecutionBatch::Parallel(std::mem::take(
+                    &mut parallel_chunk,
+                )));
+            }
             parallel_chunk.push(plan);
             continue;
         }
