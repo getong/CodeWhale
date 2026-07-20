@@ -970,7 +970,10 @@ mod atomic_write_tests {
             .permissions()
             .mode();
         assert_eq!(after & 0o777, expected_ordinary);
-        assert_eq!(after & !0o777, 0, "special bits must not be restored");
+        // `PermissionsExt::mode()` also contains the regular-file type bit on
+        // macOS/BSD. Check only the Unix special permission bits rather than
+        // treating every non-rwx bit as a restored permission.
+        assert_eq!(after & 0o7000, 0, "special bits must not be restored");
     }
 
     #[cfg(unix)]
