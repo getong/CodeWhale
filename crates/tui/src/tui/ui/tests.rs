@@ -2944,85 +2944,132 @@ fn session_approved_cache_keeps_tool_name_session_grants() {
 
 #[test]
 fn forced_approval_prompt_bypasses_auto_mode_shortcut() {
+    use crate::core::authority::ApprovalRequestDisposition;
     let mut app = create_test_app();
     app.approval_mode = ApprovalMode::Auto;
 
-    assert!(!should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        true,
-    ));
+    // Auto-Review does not full-access auto-approve; a forced hold still
+    // reaches a modal Prompt disposition (not Full Access policy deny).
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            true,
+        ),
+        ApprovalRequestDisposition::Prompt
+    );
 }
 
 #[test]
 fn forced_approval_prompt_bypasses_session_approval_shortcut() {
+    use crate::core::authority::ApprovalRequestDisposition;
     let mut app = create_test_app();
     app.mode = AppMode::Agent;
     app.approval_mode = ApprovalMode::Suggest;
     app.approval_session_approved
         .insert("shell:exec_shell:cargo test".to_string());
 
-    assert!(!should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        true,
-    ));
+    // Session grant alone cannot auto-approve a forced policy hold under Ask —
+    // the disposition stays Prompt so the user still sees the hold.
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            true,
+        ),
+        ApprovalRequestDisposition::Prompt
+    );
 }
 
 #[test]
 fn full_access_auto_approves_requests_while_auto_review_does_not() {
+    use crate::core::authority::ApprovalRequestDisposition;
     let mut app = create_test_app();
     app.approval_mode = ApprovalMode::Auto;
-    assert!(!should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        false,
-    ));
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            false,
+        ),
+        ApprovalRequestDisposition::Prompt
+    );
 
     app.approval_mode = ApprovalMode::Bypass;
-    assert!(should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        false,
-    ));
-    assert!(!should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        true,
-    ));
-    assert!(should_auto_deny_forced_approval_request(&app, true));
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            false,
+        ),
+        ApprovalRequestDisposition::AutoApprove
+    );
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            true,
+        ),
+        ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold
+    );
 
     app.approval_mode = ApprovalMode::Suggest;
     app.mode = AppMode::Yolo;
-    assert!(should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        false,
-    ));
-    assert!(!should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        true,
-    ));
-    assert!(should_auto_deny_forced_approval_request(&app, true));
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            false,
+        ),
+        ApprovalRequestDisposition::AutoApprove
+    );
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            true,
+        ),
+        ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold
+    );
 
     app.mode = AppMode::Agent;
     app.approval_session_approved
         .insert("shell:exec_shell:cargo test".to_string());
-    assert!(should_auto_approve_approval_request(
-        &app,
-        "exec_shell",
-        "shell:exec_shell:cargo test",
-        false,
-    ));
-    assert!(!should_auto_deny_forced_approval_request(&app, true));
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            false,
+        ),
+        ApprovalRequestDisposition::AutoApprove
+    );
+    // Without Full Access, a forced hold still opens a modal (Prompt).
+    assert_eq!(
+        resolve_ui_approval_disposition(
+            &app,
+            "exec_shell",
+            "shell:exec_shell:cargo test",
+            "key",
+            true,
+        ),
+        ApprovalRequestDisposition::Prompt
+    );
 }
 
 #[test]

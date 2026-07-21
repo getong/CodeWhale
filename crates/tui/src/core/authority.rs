@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use crate::sandbox::SandboxPolicy;
+use crate::tools::spec::ApprovalRequirement;
 use crate::tui::app::AppMode;
 use crate::tui::approval::ApprovalMode;
 use crate::worker_profile::ShellPolicy;
@@ -103,6 +104,31 @@ impl TurnAuthority {
     #[must_use]
     pub(crate) fn approval_mode_for_session(&self) -> ApprovalMode {
         agent_approval_mode_for_turn(self.auto_approve, self.approval_mode)
+    }
+
+    /// Authority for the per-tool approval gate, folded from the legacy
+    /// session `auto_approve` bit so [`resolve_tool_permission`] observes the
+    /// same effective posture the old boolean helpers encoded: a set bit is
+    /// Full Access (Yolo/Bypass-shaped), a cleared bit is an ordinary Ask
+    /// turn. The engine's `Never` denial deliberately stays at the UI layer,
+    /// so this constructor never produces a `Never` posture.
+    #[must_use]
+    pub(crate) fn for_tool_approval_decision(auto_approve: bool) -> Self {
+        Self::from_effective_fields(
+            if auto_approve {
+                AppMode::Yolo
+            } else {
+                AppMode::Agent
+            },
+            true,
+            false,
+            auto_approve,
+            if auto_approve {
+                ApprovalMode::Bypass
+            } else {
+                ApprovalMode::Suggest
+            },
+        )
     }
 
     #[must_use]
@@ -238,19 +264,8 @@ pub(crate) enum ToolPermission {
     Allow,
     /// Tool requires user approval before execution.
     Prompt,
-    /// Tool is denied (approval_mode=Never or policy block).
+    /// Tool is denied without a prompt (approval_mode=Never).
     Deny,
-}
-
-/// Tool-declared approval requirement (mirrors `codewhale_tools::ApprovalRequirement`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolApprovalRequirement {
-    /// Tool is always auto-approved (most reads).
-    Auto,
-    /// Tool prompts unless the turn has auto-approve authority.
-    Suggest,
-    /// Tool always prompts regardless of auto-approve (non-bypassable).
-    Required,
 }
 
 /// Unified per-tool permission resolver (#4412).
@@ -258,19 +273,34 @@ pub(crate) enum ToolApprovalRequirement {
 /// Consolidates the approval decision that was previously scattered across
 /// `registered_tool_approval_required` (turn_loop), `app_auto_approve_enabled`
 /// (ui.rs), and the `Never` short-circuit. One call site, one answer.
+///
+/// The truth table mirrors the legacy helpers exactly:
+/// - `Auto` tools always run — even under `Never`, which stays read-only
+///   rather than dead.
+/// - `Never` denies any tool that would otherwise prompt, but only when the
+///   authority is not full-access shaped: a Yolo/Bypass authority carrying a
+///   stale `Never` enum still auto-approves, matching the legacy UI order in
+///   which the full-access shortcut ran before the `Never` check.
+/// - `Suggest` and `Required` are both bypassable by auto-approve authority
+///   unless the tool is on the typed non-bypassable hold list
+///   (`is_non_bypassable`), which always prompts. A generic `Required` tool
+///   remains auto-approved in Full Access (#3866).
 #[must_use]
 pub(crate) fn resolve_tool_permission(
     authority: &TurnAuthority,
-    requirement: ToolApprovalRequirement,
+    requirement: ApprovalRequirement,
     is_non_bypassable: bool,
 ) -> ToolPermission {
-    if authority.approval_mode == ApprovalMode::Never {
+    if authority.approval_mode == ApprovalMode::Never
+        && requirement != ApprovalRequirement::Auto
+        && !authority.auto_approve
+        && authority.mode != AppMode::Yolo
+    {
         return ToolPermission::Deny;
     }
     match requirement {
-        ToolApprovalRequirement::Auto => ToolPermission::Allow,
-        ToolApprovalRequirement::Required => ToolPermission::Prompt,
-        ToolApprovalRequirement::Suggest => {
+        ApprovalRequirement::Auto => ToolPermission::Allow,
+        ApprovalRequirement::Suggest | ApprovalRequirement::Required => {
             if is_non_bypassable {
                 return ToolPermission::Prompt;
             }
@@ -283,5 +313,199 @@ pub(crate) fn resolve_tool_permission(
                 ToolPermission::Prompt
             }
         }
+    }
+}
+
+/// Disposition for an approval request that reached the UI (#4412).
+///
+/// The engine emits `ApprovalRequired` whenever its resolver answer was
+/// `Prompt`; the UI then disposes of that request — honoring session caches
+/// and posture races — through this single decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalRequestDisposition {
+    /// Session grant or full-access posture: approve without a modal.
+    AutoApprove,
+    /// The user already denied this approval key this session (#360).
+    AutoDenySessionDenied,
+    /// A forced (non-bypassable) policy hold arrived under a full-access
+    /// posture that opens no modal: fail closed.
+    AutoDenyFullAccessPolicyHold,
+    /// approval_mode=Never: deny without a modal.
+    AutoDenyNeverPosture,
+    /// Open the approval modal.
+    Prompt,
+}
+
+/// Resolve how the UI disposes of one incoming approval request.
+///
+/// `session_approved` / `session_denied` are the caller's lookups into the
+/// session approval caches (grouping key or tool name / exact approval key).
+/// The branch order is the legacy handler's order: session denial, then the
+/// full-access forced-hold denial, then auto-approval (full access or a
+/// session grant), then the `Never` denial, and only finally a modal.
+#[must_use]
+pub(crate) fn resolve_approval_request_disposition(
+    authority: &TurnAuthority,
+    session_approved: bool,
+    session_denied: bool,
+    approval_force_prompt: bool,
+) -> ApprovalRequestDisposition {
+    if session_denied {
+        return ApprovalRequestDisposition::AutoDenySessionDenied;
+    }
+    // The request exists, so the engine already resolved Prompt for the tool
+    // itself. What remains is the posture question: how does this authority
+    // treat an ordinary promptable tool?
+    let posture = resolve_tool_permission(authority, ApprovalRequirement::Suggest, false);
+    if approval_force_prompt && posture == ToolPermission::Allow {
+        return ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold;
+    }
+    if !approval_force_prompt && (posture == ToolPermission::Allow || session_approved) {
+        return ApprovalRequestDisposition::AutoApprove;
+    }
+    if posture == ToolPermission::Deny {
+        return ApprovalRequestDisposition::AutoDenyNeverPosture;
+    }
+    ApprovalRequestDisposition::Prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn authority(mode: AppMode, auto_approve: bool, approval_mode: ApprovalMode) -> TurnAuthority {
+        TurnAuthority::from_effective_fields(mode, true, false, auto_approve, approval_mode)
+    }
+
+    #[test]
+    fn auto_requirement_always_allows() {
+        for (mode, auto_approve, approval_mode) in [
+            (AppMode::Agent, false, ApprovalMode::Suggest),
+            (AppMode::Agent, false, ApprovalMode::Auto),
+            (AppMode::Agent, false, ApprovalMode::Never),
+            (AppMode::Agent, true, ApprovalMode::Bypass),
+            (AppMode::Yolo, true, ApprovalMode::Bypass),
+            (AppMode::Plan, false, ApprovalMode::Suggest),
+        ] {
+            let auth = authority(mode, auto_approve, approval_mode);
+            for non_bypassable in [false, true] {
+                assert_eq!(
+                    resolve_tool_permission(&auth, ApprovalRequirement::Auto, non_bypassable),
+                    ToolPermission::Allow,
+                    "{mode:?}/{auto_approve}/{approval_mode:?}/nb={non_bypassable}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ask_posture_prompts_for_non_auto_tools() {
+        let auth = authority(AppMode::Agent, false, ApprovalMode::Suggest);
+        for requirement in [ApprovalRequirement::Suggest, ApprovalRequirement::Required] {
+            assert_eq!(
+                resolve_tool_permission(&auth, requirement, false),
+                ToolPermission::Prompt
+            );
+            assert_eq!(
+                resolve_tool_permission(&auth, requirement, true),
+                ToolPermission::Prompt
+            );
+        }
+    }
+
+    #[test]
+    fn full_access_allows_bypassable_but_prompts_for_non_bypassable() {
+        for auth in [
+            authority(AppMode::Agent, true, ApprovalMode::Bypass),
+            authority(AppMode::Yolo, true, ApprovalMode::Bypass),
+            TurnAuthority::for_tool_approval_decision(true),
+        ] {
+            for requirement in [ApprovalRequirement::Suggest, ApprovalRequirement::Required] {
+                assert_eq!(
+                    resolve_tool_permission(&auth, requirement, false),
+                    ToolPermission::Allow,
+                    "generic {requirement:?} tool stays auto-approved in Full Access"
+                );
+                assert_eq!(
+                    resolve_tool_permission(&auth, requirement, true),
+                    ToolPermission::Prompt,
+                    "non-bypassable {requirement:?} tool forces a prompt in Full Access"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn never_denies_promptable_tools_but_not_reads_or_full_access_shapes() {
+        let never = authority(AppMode::Agent, false, ApprovalMode::Never);
+        assert_eq!(
+            resolve_tool_permission(&never, ApprovalRequirement::Suggest, false),
+            ToolPermission::Deny
+        );
+        assert_eq!(
+            resolve_tool_permission(&never, ApprovalRequirement::Required, true),
+            ToolPermission::Deny
+        );
+        assert_eq!(
+            resolve_tool_permission(&never, ApprovalRequirement::Auto, false),
+            ToolPermission::Allow,
+            "Never remains read-only rather than dead"
+        );
+
+        // Legacy host shape: full-access bit/Yolo mode with a stale Never enum
+        // still auto-approves — the UI's full-access shortcut ran before its
+        // Never check.
+        let stale = authority(AppMode::Agent, true, ApprovalMode::Never);
+        assert_eq!(
+            resolve_tool_permission(&stale, ApprovalRequirement::Suggest, false),
+            ToolPermission::Allow
+        );
+        let yolo_never = authority(AppMode::Yolo, false, ApprovalMode::Never);
+        assert_eq!(
+            resolve_tool_permission(&yolo_never, ApprovalRequirement::Suggest, false),
+            ToolPermission::Allow
+        );
+    }
+
+    #[test]
+    fn approval_request_disposition_preserves_legacy_branch_order() {
+        let ask = authority(AppMode::Agent, false, ApprovalMode::Suggest);
+        let full_access = authority(AppMode::Agent, true, ApprovalMode::Bypass);
+        let never = authority(AppMode::Agent, false, ApprovalMode::Never);
+
+        // Session denial wins over everything, including full access.
+        assert_eq!(
+            resolve_approval_request_disposition(&full_access, true, true, false),
+            ApprovalRequestDisposition::AutoDenySessionDenied
+        );
+        // Forced hold under full access fails closed instead of auto-approving.
+        assert_eq!(
+            resolve_approval_request_disposition(&full_access, true, false, true),
+            ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold
+        );
+        // Full access and session grants auto-approve ordinary requests.
+        assert_eq!(
+            resolve_approval_request_disposition(&full_access, false, false, false),
+            ApprovalRequestDisposition::AutoApprove
+        );
+        assert_eq!(
+            resolve_approval_request_disposition(&ask, true, false, false),
+            ApprovalRequestDisposition::AutoApprove
+        );
+        // A session grant still auto-approves under Never (legacy order), and
+        // Never denies everything else promptable.
+        assert_eq!(
+            resolve_approval_request_disposition(&never, true, false, false),
+            ApprovalRequestDisposition::AutoApprove
+        );
+        assert_eq!(
+            resolve_approval_request_disposition(&never, false, false, false),
+            ApprovalRequestDisposition::AutoDenyNeverPosture
+        );
+        // Ask posture with no grant opens the modal.
+        assert_eq!(
+            resolve_approval_request_disposition(&ask, false, false, false),
+            ApprovalRequestDisposition::Prompt
+        );
     }
 }

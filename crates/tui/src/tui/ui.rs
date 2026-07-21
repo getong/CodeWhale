@@ -319,29 +319,37 @@ async fn auto_deny_session_approval(
     surface_session_denied_notice(app, tool_name);
 }
 
-fn should_auto_approve_approval_request(
+fn app_auto_approve_enabled(app: &App) -> bool {
+    app.mode == AppMode::Yolo || app.approval_mode == ApprovalMode::Bypass
+}
+
+/// Build the UI-side TurnAuthority for approval disposition (#4412).
+///
+/// Shell/trust bits do not affect disposition; mode + approval_mode + the
+/// full-access shape (Yolo/Bypass) are what the shared resolver consults.
+fn app_turn_authority_for_approvals(app: &App) -> crate::core::authority::TurnAuthority {
+    crate::core::authority::TurnAuthority::from_effective_fields(
+        app.mode,
+        true,
+        false,
+        app_auto_approve_enabled(app),
+        app.approval_mode,
+    )
+}
+
+fn resolve_ui_approval_disposition(
     app: &App,
     tool_name: &str,
     grouping_key: &str,
+    approval_key: &str,
     approval_force_prompt: bool,
-) -> bool {
-    // Full Access is an explicit no-ordinary-approval-prompt contract. This
-    // UI backstop resolves a request emitted just before a posture update or
-    // by a child turn. A forced policy hold is never converted into approval.
-    !approval_force_prompt
-        && (app_auto_approve_enabled(app)
-            || is_session_approved_for_tool(app, tool_name, grouping_key))
-}
-
-fn should_auto_deny_forced_approval_request(app: &App, approval_force_prompt: bool) -> bool {
-    // Repository/managed-policy holds cannot be bypassed by Full Access, but
-    // Full Access must not open a contradictory approval modal either. Fail
-    // closed and let the model surface the policy constraint.
-    approval_force_prompt && app_auto_approve_enabled(app)
-}
-
-fn app_auto_approve_enabled(app: &App) -> bool {
-    app.mode == AppMode::Yolo || app.approval_mode == ApprovalMode::Bypass
+) -> crate::core::authority::ApprovalRequestDisposition {
+    crate::core::authority::resolve_approval_request_disposition(
+        &app_turn_authority_for_approvals(app),
+        is_session_approved_for_tool(app, tool_name, grouping_key),
+        is_session_denied_for_key(app, approval_key),
+        approval_force_prompt,
+    )
 }
 
 fn should_suppress_user_input_prompt(app: &App) -> bool {
@@ -3821,101 +3829,114 @@ async fn run_event_loop(
                         intent_summary,
                         approval_force_prompt,
                     } => {
-                        let session_denied = is_session_denied_for_key(app, &approval_key);
-                        if session_denied {
-                            // The user already denied a matching approval key
-                            // during this process; auto-deny so the
-                            // model's retry loop doesn't keep re-prompting
-                            // (#360).
-                            auto_deny_session_approval(
-                                app,
-                                &engine_handle,
-                                &id,
-                                &tool_name,
-                                &approval_key,
-                            )
-                            .await;
-                        } else if should_auto_deny_forced_approval_request(
-                            app,
-                            approval_force_prompt,
-                        ) {
-                            log_sensitive_event(
-                                "tool.approval.auto_deny_full_access_policy",
-                                serde_json::json!({
-                                    "tool_name": tool_name,
-                                    "session_id": app.current_session_id,
-                                    "mode": app.mode.label(),
-                                }),
-                            );
-                            let _ = engine_handle.deny_tool_call(id.clone()).await;
-                            let notice = app
-                                .tr(MessageId::ApprovalFullAccessPolicyBlocked)
-                                .replace("{tool}", &tool_name);
-                            app.push_status_toast(notice, StatusToastLevel::Warning, Some(12_000));
-                        } else if should_auto_approve_approval_request(
+                        use crate::core::authority::ApprovalRequestDisposition;
+                        // One disposition path for every ApprovalRequired (#4412):
+                        // session denial, Full Access policy hold, session/FA
+                        // auto-approve, Never posture, or modal prompt.
+                        match resolve_ui_approval_disposition(
                             app,
                             &tool_name,
                             &approval_grouping_key,
+                            &approval_key,
                             approval_force_prompt,
                         ) {
-                            log_sensitive_event(
-                                "tool.approval.auto_approve_session",
-                                serde_json::json!({
-                                    "tool_name": tool_name,
-                                    "approval_key": approval_key,
-                                    "session_id": app.current_session_id,
-                                    "mode": app.mode.label(),
-                                }),
-                            );
-                            let _ = engine_handle.approve_tool_call(id.clone()).await;
-                        } else if app.approval_mode == ApprovalMode::Never {
-                            log_sensitive_event(
-                                "tool.approval.auto_deny",
-                                serde_json::json!({
-                                    "tool_name": tool_name,
-                                    "session_id": app.current_session_id,
-                                    "mode": app.mode.label(),
-                                }),
-                            );
-                            let _ = engine_handle.deny_tool_call(id.clone()).await;
-                            app.status_message =
-                                Some(format!("Blocked tool '{tool_name}' (approval_mode=never)"));
-                        } else {
-                            let tool_input = input;
-
-                            push_approval_request_view(
-                                app,
-                                &id,
-                                &tool_name,
-                                &description,
-                                &tool_input,
-                                &approval_key,
-                                intent_summary.as_deref(),
-                            );
-                            log_sensitive_event(
-                                "tool.approval.prompted",
-                                serde_json::json!({
-                                    "tool_name": tool_name,
-                                    "description": description,
-                                    "session_id": app.current_session_id,
-                                    "mode": app.mode.label(),
-                                }),
-                            );
-                            if let Some((method, _, _)) =
-                                crate::tui::notifications::settings(config)
-                            {
-                                let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
-                                crate::tui::notifications::notify_done(
-                                    method,
-                                    in_tmux,
-                                    &format!("Approval needed: {tool_name} - {description}"),
-                                    Duration::ZERO,
-                                    Duration::ZERO,
+                            ApprovalRequestDisposition::AutoDenySessionDenied => {
+                                // The user already denied a matching approval key
+                                // during this process; auto-deny so the
+                                // model's retry loop doesn't keep re-prompting
+                                // (#360).
+                                auto_deny_session_approval(
+                                    app,
+                                    &engine_handle,
+                                    &id,
+                                    &tool_name,
+                                    &approval_key,
+                                )
+                                .await;
+                            }
+                            ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold => {
+                                log_sensitive_event(
+                                    "tool.approval.auto_deny_full_access_policy",
+                                    serde_json::json!({
+                                        "tool_name": tool_name,
+                                        "session_id": app.current_session_id,
+                                        "mode": app.mode.label(),
+                                    }),
+                                );
+                                let _ = engine_handle.deny_tool_call(id.clone()).await;
+                                let notice = app
+                                    .tr(MessageId::ApprovalFullAccessPolicyBlocked)
+                                    .replace("{tool}", &tool_name);
+                                app.push_status_toast(
+                                    notice,
+                                    StatusToastLevel::Warning,
+                                    Some(12_000),
                                 );
                             }
-                            app.status_message = Some(format!(
-                                "Approval required for '{tool_name}': {description}"
-                            ));
+                            ApprovalRequestDisposition::AutoApprove => {
+                                log_sensitive_event(
+                                    "tool.approval.auto_approve_session",
+                                    serde_json::json!({
+                                        "tool_name": tool_name,
+                                        "approval_key": approval_key,
+                                        "session_id": app.current_session_id,
+                                        "mode": app.mode.label(),
+                                    }),
+                                );
+                                let _ = engine_handle.approve_tool_call(id.clone()).await;
+                            }
+                            ApprovalRequestDisposition::AutoDenyNeverPosture => {
+                                log_sensitive_event(
+                                    "tool.approval.auto_deny",
+                                    serde_json::json!({
+                                        "tool_name": tool_name,
+                                        "session_id": app.current_session_id,
+                                        "mode": app.mode.label(),
+                                    }),
+                                );
+                                let _ = engine_handle.deny_tool_call(id.clone()).await;
+                                app.status_message = Some(format!(
+                                    "Blocked tool '{tool_name}' (approval_mode=never)"
+                                ));
+                            }
+                            ApprovalRequestDisposition::Prompt => {
+                                let tool_input = input;
+
+                                push_approval_request_view(
+                                    app,
+                                    &id,
+                                    &tool_name,
+                                    &description,
+                                    &tool_input,
+                                    &approval_key,
+                                    intent_summary.as_deref(),
+                                );
+                                log_sensitive_event(
+                                    "tool.approval.prompted",
+                                    serde_json::json!({
+                                        "tool_name": tool_name,
+                                        "description": description,
+                                        "session_id": app.current_session_id,
+                                        "mode": app.mode.label(),
+                                    }),
+                                );
+                                if let Some((method, _, _)) =
+                                    crate::tui::notifications::settings(config)
+                                {
+                                    let in_tmux =
+                                        std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
+                                    crate::tui::notifications::notify_done(
+                                        method,
+                                        in_tmux,
+                                        &format!("Approval needed: {tool_name} - {description}"),
+                                        Duration::ZERO,
+                                        Duration::ZERO,
+                                    );
+                                }
+                                app.status_message = Some(format!(
+                                    "Approval required for '{tool_name}': {description}"
+                                ));
+                            }
                         }
                     }
                     EngineEvent::UserInputRequired { id, request } => {

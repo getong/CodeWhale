@@ -11,6 +11,7 @@ use super::stuck_guard::{
     RUNTIME_NOTICE as STUCK_RUNTIME_NOTICE, StepFingerprint, StuckGuard, StuckSignal,
 };
 use super::*;
+use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
 use crate::prompt_zones::PinnedPrefix;
 use crate::runtime_handoff::{
@@ -43,13 +44,16 @@ pub(super) fn registered_tool_approval_required(
     requirement: ApprovalRequirement,
     auto_approve: bool,
 ) -> bool {
-    if requirement == ApprovalRequirement::Auto {
-        return false;
-    }
-    if registered_tool_requires_non_bypassable_approval(tool_name) {
-        return true;
-    }
-    !auto_approve
+    // Single permission contract (#4412): fold the session auto_approve bit
+    // into TurnAuthority and ask the shared resolver. Prompt means the tool
+    // must surface an approval request; Allow/Deny keep the call unprompted
+    // (Deny is UI-layer Never posture and is not produced here).
+    let authority = crate::core::authority::TurnAuthority::for_tool_approval_decision(auto_approve);
+    let is_non_bypassable = registered_tool_requires_non_bypassable_approval(tool_name);
+    matches!(
+        resolve_tool_permission(&authority, requirement, is_non_bypassable),
+        ToolPermission::Prompt
+    )
 }
 
 pub(super) fn registered_tool_blocked_in_full_access(
@@ -57,6 +61,9 @@ pub(super) fn registered_tool_blocked_in_full_access(
     requirement: ApprovalRequirement,
     auto_approve: bool,
 ) -> bool {
+    // Full Access does not open tool-approval modals. Non-bypassable holds
+    // that would still Prompt under Full Access are blocked at the engine
+    // instead of opening a contradictory modal (#3866).
     auto_approve && registered_tool_forces_prompt(tool_name, requirement)
 }
 
