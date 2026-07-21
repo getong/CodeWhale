@@ -180,10 +180,11 @@ pub enum ShellPhase {
 const WORKING_BUBBLE_FRAMES: [&str; 8] = ["⠀", "⢀", "⣀", "⣄", "⣤", "⣦", "⣶", "⣿"];
 const COMPLETION_BREATH_MS: u128 = 800;
 const COMPLETION_RELEASE_MS: u128 = 560;
+const IDLE_WHALE_SPOUT_ROW: &str = "   ˚";
 const IDLE_WHALE_ROWS: [&str; 3] = [
-    " ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▖    ▚▞",
-    "▐██·████████████▙▄▄▄▞",
-    " ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▘",
+    "  ▗▄▄▄▄▄▄▄▄▄▄▄▖      ▚▞",
+    " ▐██·███████████▙━━━━▞",
+    "  ▝▀▀▀▀▀▀▀▀▀▀▀▀▘",
 ];
 const IDLE_SHIMMER_CYCLE_MS: u128 = 4_000;
 const IDLE_SHIMMER_SWEEP_FRACTION: f32 = 0.32;
@@ -922,6 +923,15 @@ fn idle_whale_row_spans(
     spans
 }
 
+#[must_use]
+fn idle_whale_block_width() -> usize {
+    std::iter::once(IDLE_WHALE_SPOUT_ROW)
+        .chain(IDLE_WHALE_ROWS.iter().copied())
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
+}
+
 pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
@@ -933,7 +943,7 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         let animated = idle_mark_animation_enabled(app);
         let elapsed_ms = app.ocean_started_at.elapsed().as_millis();
         let mut mark = vec![vec![Span::styled(
-            "   ˚",
+            IDLE_WHALE_SPOUT_ROW,
             Style::default().fg(app.ui_theme.accent_secondary),
         )]];
         mark.extend(IDLE_WHALE_ROWS.iter().enumerate().map(|(row, text)| {
@@ -947,10 +957,12 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
                 app.ui_theme.text_body,
             )
         }));
+        // The spout, head, belly, peduncle, and flukes are one drawing. Give
+        // every row the same outer inset so the authored offsets survive;
+        // centering each row independently shears the silhouette apart.
+        let block_inset = " ".repeat(width.saturating_sub(idle_whale_block_width()) / 2);
         for row in mark {
-            let row_width = span_width(&row);
-            let inset = " ".repeat(width.saturating_sub(row_width) / 2);
-            let mut spans = vec![Span::raw(inset)];
+            let mut spans = vec![Span::raw(block_inset.clone())];
             spans.extend(row);
             lines.push(Line::from(spans));
         }
@@ -1398,6 +1410,95 @@ mod tests {
         }
         assert_ne!(colors(&moving), colors(&parked));
         assert_eq!(colors(&frozen_a), colors(&frozen_b));
+    }
+
+    #[test]
+    fn idle_whale_rows_share_one_centered_block_without_losing_authored_offsets() {
+        let mut app = test_app();
+        app.low_motion = true;
+        let width = 60usize;
+        let rendered = empty_state_lines(&app, Rect::new(0, 0, width as u16, 16))
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let block_width = idle_whale_block_width();
+        let block_inset = (width - block_width) / 2;
+
+        assert_eq!(
+            block_width, 23,
+            "the final mark should stay quiet at 60 cols"
+        );
+        for row in std::iter::once(IDLE_WHALE_SPOUT_ROW).chain(IDLE_WHALE_ROWS) {
+            let line = rendered
+                .iter()
+                .find(|line| line.trim_start() == row.trim_start())
+                .unwrap_or_else(|| panic!("missing authored whale row {row:?}"));
+            let rendered_inset = line.chars().take_while(|ch| *ch == ' ').count();
+            let authored_inset = row.chars().take_while(|ch| *ch == ' ').count();
+
+            assert_eq!(
+                rendered_inset - authored_inset,
+                block_inset,
+                "row drifted out of the shared silhouette: {line:?}"
+            );
+            assert!(
+                line.width() <= block_inset + block_width,
+                "row escaped the centered mark block: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_whale_has_a_recognizable_ascii_safe_silhouette() {
+        let ascii_row = |row: &str| {
+            let mut rendered = String::new();
+            for ch in row.chars() {
+                let mut cell = ratatui::buffer::Cell::default();
+                cell.set_symbol(&ch.to_string());
+                crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
+                rendered.push_str(cell.symbol());
+            }
+            rendered
+        };
+        let rows = std::iter::once(IDLE_WHALE_SPOUT_ROW)
+            .chain(IDLE_WHALE_ROWS)
+            .map(ascii_row)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            [
+                "   o",
+                r"  .###########.      \/",
+                " |##.############----/",
+                "  .############.",
+            ]
+        );
+        assert!(rows.iter().all(|row| row.is_ascii()));
+    }
+
+    #[test]
+    fn reduced_motion_keeps_the_whole_idle_mark_still_and_cursorless() {
+        let mut app = test_app();
+        app.low_motion = true;
+        app.fancy_animations = true;
+        app.cursor_position = 7;
+        app.ocean_started_at = Instant::now() - Duration::from_secs(2);
+        let first = empty_state_lines(&app, Rect::new(0, 0, 100, 30));
+
+        app.ocean_started_at = Instant::now() - Duration::from_secs(11);
+        let second = empty_state_lines(&app, Rect::new(0, 0, 100, 30));
+
+        assert_eq!(first, second, "reduced motion must freeze mark and shine");
+        assert_eq!(
+            app.cursor_position, 7,
+            "the empty-state decoration must leave cursor ownership to the composer"
+        );
     }
 
     #[test]
