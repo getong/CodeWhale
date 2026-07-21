@@ -983,6 +983,9 @@ fn validate_discovered_oauth_endpoint(
     if !parsed.username().is_empty() || parsed.password().is_some() {
         bail!("xAI OIDC discovery returned credentials in {field}");
     }
+    if parsed.origin() != issuer.origin() {
+        bail!("xAI OIDC discovery returned {field} on a different origin than the issuer");
+    }
     Ok(endpoint.to_string())
 }
 
@@ -2076,6 +2079,31 @@ consent_version = 1
         .expect_err("HTTPS issuer must reject an HTTP endpoint");
 
         assert!(error.to_string().contains("downgrade"), "{error}");
+    }
+
+    #[test]
+    fn https_discovery_accepts_same_origin_with_explicit_default_port() {
+        let endpoint = "https://auth.x.ai:443/oauth2/token";
+        let validated = validate_discovered_oauth_endpoint(
+            Some(endpoint.to_string()),
+            "token_endpoint",
+            XAI_OIDC_ISSUER,
+        )
+        .expect("URL origins normalize the explicit default HTTPS port");
+
+        assert_eq!(validated, endpoint);
+    }
+
+    #[test]
+    fn https_discovery_rejects_cross_origin_endpoint() {
+        let error = validate_discovered_oauth_endpoint(
+            Some("https://oauth.attacker.example/oauth2/token".to_string()),
+            "token_endpoint",
+            XAI_OIDC_ISSUER,
+        )
+        .expect_err("discovered OAuth endpoints must stay on the issuer origin");
+
+        assert!(error.to_string().contains("different origin"), "{error}");
     }
 
     #[test]
