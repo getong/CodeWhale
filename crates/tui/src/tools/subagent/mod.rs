@@ -4485,6 +4485,11 @@ fn apply_session_spawn_policy(
     }
     match runtime.parent_mode {
         AppMode::Operate => {
+            // #4598: Operate delegates bounded leaves by default. Children
+            // cannot spawn further unless the caller explicitly sets max_depth.
+            if request.max_depth.is_none() {
+                request.max_depth = Some(0);
+            }
             if request.profile.is_some() || request.agent_type_explicit {
                 return None;
             }
