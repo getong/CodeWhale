@@ -150,6 +150,19 @@ pub enum SandboxPolicy {
 pub struct ToolContext {
     /// The workspace root directory
     pub workspace: PathBuf,
+    /// Per-turn policy and attached services. Kept behind one owned group so
+    /// cloning a context preserves the historical value semantics while the
+    /// top-level context remains small and stable as services evolve.
+    pub execution: Box<ToolExecutionState>,
+}
+
+/// Policy and service state attached to one tool-execution context.
+///
+/// `ToolContext` dereferences to this group for source compatibility with
+/// existing tools. New code can use `context.execution` when the grouping is
+/// useful, without growing the top-level context by another field per feature.
+#[derive(Clone)]
+pub struct ToolExecutionState {
     /// Shared shell manager for background tasks and streaming IO.
     pub shell_manager: SharedShellManager,
     /// Per-session snapshots for files successfully observed by `read_file`.
@@ -269,12 +282,25 @@ pub struct ToolContext {
     >,
 }
 
+impl std::ops::Deref for ToolContext {
+    type Target = ToolExecutionState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.execution
+    }
+}
+
+impl std::ops::DerefMut for ToolContext {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.execution
+    }
+}
+
 impl ToolContext {
     /// Create a new `ToolContext` with default settings.
     #[must_use]
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
-        let shell_manager = new_shared_shell_manager(workspace.clone());
         // Prefer .codewhale, fall back to .deepseek for project-local state
         let notes_path = codewhale_config::resolve_project_state_dir(&workspace, "notes.md")
             .expect("hardcoded project notes state path is valid")
@@ -282,44 +308,7 @@ impl ToolContext {
         let mcp_config_path = codewhale_config::resolve_project_state_dir(&workspace, "mcp.json")
             .expect("hardcoded project MCP state path is valid")
             .1;
-        Self {
-            workspace,
-            shell_manager,
-            file_read_tracker: new_shared_file_read_tracker(),
-            owner_agent_id: None,
-            owner_agent_name: None,
-            trust_mode: false,
-            sandbox_policy: SandboxPolicy::None,
-            notes_path,
-            mcp_config_path,
-            skills_dir: None,
-            skills_scan_codewhale_only: false,
-            plugin_registry: None,
-            elevated_sandbox_policy: None,
-            shell_network_denied_hint: None,
-            auto_approve: false,
-            review_plan_changes: false,
-            shell_policy: ShellPolicy::Full,
-            features: Features::with_defaults(),
-            state_namespace: "workspace".to_string(),
-            route_context_window: None,
-            trusted_external_paths: Vec::new(),
-            follow_symlinks: false,
-            network_policy: None,
-            runtime: RuntimeToolServices::default(),
-            session_objects: None,
-            cancel_token: None,
-            sandbox_backend: None,
-            memory_path: None,
-            lsp_manager: None,
-            large_output_router: None,
-            search_provider: crate::config::SearchProvider::default(),
-            search_api_key: None,
-            search_base_url: None,
-            provider_native_search: None,
-            route_capabilities: codewhale_config::route::RouteCapabilities::default(),
-            workshop_vars: None,
-        }
+        Self::with_options(workspace, false, notes_path, mcp_config_path)
     }
 
     /// Create a `ToolContext` with all settings specified.
@@ -334,41 +323,43 @@ impl ToolContext {
         let shell_manager = new_shared_shell_manager(workspace.clone());
         Self {
             workspace,
-            shell_manager,
-            file_read_tracker: new_shared_file_read_tracker(),
-            owner_agent_id: None,
-            owner_agent_name: None,
-            trust_mode,
-            sandbox_policy: SandboxPolicy::None,
-            notes_path: notes_path.into(),
-            mcp_config_path: mcp_config_path.into(),
-            skills_dir: None,
-            skills_scan_codewhale_only: false,
-            plugin_registry: None,
-            elevated_sandbox_policy: None,
-            shell_network_denied_hint: None,
-            auto_approve: false,
-            review_plan_changes: false,
-            shell_policy: ShellPolicy::Full,
-            features: Features::with_defaults(),
-            state_namespace: "workspace".to_string(),
-            route_context_window: None,
-            trusted_external_paths: Vec::new(),
-            follow_symlinks: false,
-            network_policy: None,
-            runtime: RuntimeToolServices::default(),
-            session_objects: None,
-            cancel_token: None,
-            sandbox_backend: None,
-            memory_path: None,
-            lsp_manager: None,
-            large_output_router: None,
-            search_provider: crate::config::SearchProvider::default(),
-            search_api_key: None,
-            search_base_url: None,
-            provider_native_search: None,
-            route_capabilities: codewhale_config::route::RouteCapabilities::default(),
-            workshop_vars: None,
+            execution: Box::new(ToolExecutionState {
+                shell_manager,
+                file_read_tracker: new_shared_file_read_tracker(),
+                owner_agent_id: None,
+                owner_agent_name: None,
+                trust_mode,
+                sandbox_policy: SandboxPolicy::None,
+                notes_path: notes_path.into(),
+                mcp_config_path: mcp_config_path.into(),
+                skills_dir: None,
+                skills_scan_codewhale_only: false,
+                plugin_registry: None,
+                elevated_sandbox_policy: None,
+                shell_network_denied_hint: None,
+                auto_approve: false,
+                review_plan_changes: false,
+                shell_policy: ShellPolicy::Full,
+                features: Features::with_defaults(),
+                state_namespace: "workspace".to_string(),
+                route_context_window: None,
+                trusted_external_paths: Vec::new(),
+                follow_symlinks: false,
+                network_policy: None,
+                runtime: RuntimeToolServices::default(),
+                session_objects: None,
+                cancel_token: None,
+                sandbox_backend: None,
+                memory_path: None,
+                lsp_manager: None,
+                large_output_router: None,
+                search_provider: crate::config::SearchProvider::default(),
+                search_api_key: None,
+                search_base_url: None,
+                provider_native_search: None,
+                route_capabilities: codewhale_config::route::RouteCapabilities::default(),
+                workshop_vars: None,
+            }),
         }
     }
 
@@ -380,46 +371,9 @@ impl ToolContext {
         mcp_config_path: impl Into<PathBuf>,
         auto_approve: bool,
     ) -> Self {
-        let workspace = workspace.into();
-        let shell_manager = new_shared_shell_manager(workspace.clone());
-        Self {
-            workspace,
-            shell_manager,
-            file_read_tracker: new_shared_file_read_tracker(),
-            owner_agent_id: None,
-            owner_agent_name: None,
-            trust_mode,
-            sandbox_policy: SandboxPolicy::None,
-            notes_path: notes_path.into(),
-            mcp_config_path: mcp_config_path.into(),
-            skills_dir: None,
-            skills_scan_codewhale_only: false,
-            plugin_registry: None,
-            elevated_sandbox_policy: None,
-            shell_network_denied_hint: None,
-            auto_approve,
-            review_plan_changes: false,
-            shell_policy: ShellPolicy::Full,
-            features: Features::with_defaults(),
-            state_namespace: "workspace".to_string(),
-            route_context_window: None,
-            trusted_external_paths: Vec::new(),
-            follow_symlinks: false,
-            network_policy: None,
-            runtime: RuntimeToolServices::default(),
-            session_objects: None,
-            cancel_token: None,
-            sandbox_backend: None,
-            memory_path: None,
-            lsp_manager: None,
-            large_output_router: None,
-            search_provider: crate::config::SearchProvider::default(),
-            search_api_key: None,
-            search_base_url: None,
-            provider_native_search: None,
-            route_capabilities: codewhale_config::route::RouteCapabilities::default(),
-            workshop_vars: None,
-        }
+        let mut context = Self::with_options(workspace, trust_mode, notes_path, mcp_config_path);
+        context.auto_approve = auto_approve;
+        context
     }
 
     /// Attach a per-domain network policy to this context (#135).
@@ -1113,6 +1067,30 @@ mod tests {
         // In trust mode, absolute paths should work
         let result = ctx.resolve_path("/tmp");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tool_context_keeps_execution_state_grouped_and_value_cloned() {
+        let mut context = ToolContext::new(".");
+        context.auto_approve = true;
+        context.state_namespace = "session-a".to_string();
+
+        assert!(context.execution.auto_approve);
+        assert_eq!(context.execution.state_namespace, "session-a");
+
+        let mut cloned = context.clone();
+        cloned.state_namespace = "session-b".to_string();
+        assert_eq!(context.state_namespace, "session-a");
+        assert_eq!(cloned.execution.state_namespace, "session-b");
+    }
+
+    #[test]
+    fn tool_context_top_level_stays_slim_as_services_grow() {
+        assert!(
+            std::mem::size_of::<ToolContext>()
+                <= std::mem::size_of::<PathBuf>() + 2 * std::mem::size_of::<usize>(),
+            "ToolContext should contain only the workspace and boxed execution group"
+        );
     }
 
     /// Issue #29: paths under a user-trusted external directory resolve
