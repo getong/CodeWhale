@@ -942,6 +942,52 @@ fn tool_history_repair_receipt_renders_as_system_history() {
 }
 
 #[test]
+fn user_history_hides_only_the_trailing_turn_metadata_block() {
+    let visible = "Explain this literal: <turn_meta>example</turn_meta>";
+    let turn_meta = concat!(
+        "<turn_meta>\n",
+        "Current local date: 2026-07-22\n",
+        "Input provenance: external_user\n",
+        "Input authority: external_current_turn\n",
+        "</turn_meta>",
+    );
+    let msg = Message {
+        role: "user".to_string(),
+        content: vec![
+            ContentBlock::Text {
+                text: visible.to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: turn_meta.to_string(),
+                cache_control: None,
+            },
+        ],
+    };
+
+    let cells = super::history_cells_from_message(&msg);
+
+    assert!(matches!(
+        cells.as_slice(),
+        [HistoryCell::User { content }] if content == visible
+    ));
+
+    let literal_only = Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "<turn_meta>user-authored example</turn_meta>".to_string(),
+            cache_control: None,
+        }],
+    };
+    let literal_cells = super::history_cells_from_message(&literal_only);
+    assert!(matches!(
+        literal_cells.as_slice(),
+        [HistoryCell::User { content }]
+            if content == "<turn_meta>user-authored example</turn_meta>"
+    ));
+}
+
+#[test]
 fn history_replays_update_plan_tool_use_as_plan_card() {
     let msg = Message {
         role: "assistant".to_string(),

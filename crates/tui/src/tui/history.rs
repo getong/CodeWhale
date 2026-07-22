@@ -480,9 +480,12 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
 
     let mut cells = Vec::new();
 
-    for block in &msg.content {
+    for (block_index, block) in msg.content.iter().enumerate() {
         match block {
             ContentBlock::Text { text, .. } => {
+                if is_trailing_turn_metadata_block(msg, block_index, text) {
+                    continue;
+                }
                 if text.starts_with("[tool_history_repair]") {
                     cells.push(HistoryCell::System {
                         content: text.clone(),
@@ -562,6 +565,18 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
     }
 
     cells
+}
+
+fn is_trailing_turn_metadata_block(msg: &Message, block_index: usize, text: &str) -> bool {
+    if msg.role != "user" || block_index == 0 || block_index + 1 != msg.content.len() {
+        return false;
+    }
+
+    let trimmed = text.trim();
+    trimmed
+        .strip_prefix("<turn_meta>")
+        .and_then(|body| body.strip_suffix("</turn_meta>"))
+        .is_some()
 }
 
 // === Tool Cells ===

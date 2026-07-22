@@ -4176,6 +4176,48 @@ fn apply_loaded_session_does_not_restore_slash_command_tail_as_retry_draft() {
 }
 
 #[test]
+fn apply_loaded_session_hides_turn_metadata_without_mutating_api_history() {
+    let turn_meta = concat!(
+        "<turn_meta>\n",
+        "Current local date: 2026-07-22\n",
+        "Input provenance: external_user\n",
+        "Input authority: external_current_turn\n",
+        "</turn_meta>",
+    );
+    let user_message = Message {
+        role: "user".to_string(),
+        content: vec![
+            ContentBlock::Text {
+                text: "Keep the restored transcript calm".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: turn_meta.to_string(),
+                cache_control: None,
+            },
+        ],
+    };
+    let session = saved_session_with_messages(vec![
+        user_message,
+        text_message("assistant", "The wire context stays complete."),
+    ]);
+    let mut app = create_test_app();
+
+    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+
+    assert!(matches!(
+        app.history.as_slice(),
+        [HistoryCell::User { content }, HistoryCell::Assistant { .. }]
+            if content == "Keep the restored transcript calm"
+    ));
+    assert!(matches!(
+        app.api_messages[0].content.as_slice(),
+        [ContentBlock::Text { text: visible, .. }, ContentBlock::Text { text: meta, .. }]
+            if visible == "Keep the restored transcript calm" && meta == turn_meta
+    ));
+}
+
+#[test]
 fn apply_loaded_session_projects_subagent_handoff_without_retry_draft_or_user_cell() {
     let mut app = create_test_app();
     let payload = concat!(
