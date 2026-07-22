@@ -278,7 +278,12 @@ ordinary durable tasks.
 
 1. Create skill directory with `SKILL.md`
 2. Define skill prompt and optional scripts
-3. Place in `~/.codewhale/skills/`
+3. Place in a CodeWhale-owned root (`~/.codewhale/skills/` or
+   `<workspace>/.codewhale/skills/`), or import from a compatible harness root
+   through `/skills`
+
+See [SKILLS.md](SKILLS.md) for the Skills Manager, audit inventory, and the
+rule that compatible roots (`.claude`, `.agents`, …) are never mutated in place.
 
 ### Adding Hooks
 

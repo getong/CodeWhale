@@ -1461,14 +1461,23 @@ If you are upgrading from older releases:
   agentskills.io-compatible `~/.agents/skills` and the broader Claude-ecosystem
   `~/.claude/skills`. First launch installs versioned bundled skills for common
   workflows including skill creation, delegation, MCP/plugin scaffolding,
-  documents, presentations, spreadsheets, PDFs, and Feishu/Lark. See
+  documents, presentations, spreadsheets, PDFs, and Feishu/Lark. Only
+  CodeWhale-owned roots (`<workspace>/.codewhale/skills` and
+  `~/.codewhale/skills`) are writable install/import targets; compatible harness
+  roots stay read-only. Bare `/skills` opens the Skills Manager (owned-only,
+  zero network). See [SKILLS.md](SKILLS.md) for the manager, audit statuses,
+  provenance markers, and mutation rules, and
   [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md) for the supported boundary
   between portable `SKILL.md` bundles and Claude Code plugin runtimes.
 - `[skills].scan_codewhale_only` (bool, default `false`): when `true`, session
   skill discovery ignores cross-tool roots such as `.claude/skills`,
   `.opencode/skills`, `.cursor/skills`, and `~/.agents/skills`. Codewhale still
   scans `<workspace>/.codewhale/skills`, `~/.codewhale/skills`, and any explicit
-  `skills_dir` override.
+  `skills_dir` override. The Skills Manager can still toggle a local compatible
+  audit scan independently of this runtime knob — see [SKILLS.md](SKILLS.md).
+- `[skills].registry_url` / `[skills].max_install_size_bytes` (optional): used by
+  `/skills --remote`, `/skills sync`, and `/skill install|update`. The default
+  manager open path does not contact the registry.
 - `[verifier].enabled` (bool, default `false`): enables automatic
   claim-of-done verifier preview once that runtime trigger is active. The
   manual `run_verifiers` tool is still available when this is false.

@@ -50,7 +50,7 @@ intentional:
 | `plugins` | Read-only bundle discovery/validation plus explicit trust, enable, disable, revoke, and reload lifecycle commands; legacy executable tools remain separate. |
 | `project` | Project initialization, sharing, LSP, and goal/hunt commands. |
 | `session` | Rename, save, fork/new/load sessions, compaction, purge, relay, and export. |
-| `skills` | Skill listing, execution, review, and restore. |
+| `skills` | Skills Manager (`/skills`), text inspect/remote/sync paths, activation (`/skill`), and managed install/update/uninstall/trust. |
 | `utility` | Attachments, tasks/jobs, MCP, and network. |
 
 ## User Commands

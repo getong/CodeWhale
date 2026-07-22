@@ -1542,14 +1542,19 @@ fn cancelled_bang_shell_settles_transcript_card() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Regression: `/skills` should reflect the same merged discovery set as the
-/// slash menu and model-visible skills block, not just the first selected
-/// skills directory.
+/// Bare `/skills` opens the unified Skills Manager (owned-only, zero network).
+/// Compatible roots (e.g. `.agents/skills`) appear only after toggling scan mode.
 #[test]
-fn skills_menu_shows_local_and_global_skills() -> anyhow::Result<()> {
+fn skills_opens_manager_owned_then_compatible() -> anyhow::Result<()> {
     let _guard = qa_pty_test_lock();
     let ws = make_sealed_workspace()?;
-    write_skill(ws.user_skills_dir(), "global-alpha", "Global alpha skill")?;
+    // Owned global root — visible in the default owned-only manager scan.
+    write_skill(
+        ws.home().join(".codewhale").join("skills"),
+        "global-alpha",
+        "Global alpha skill",
+    )?;
+    // Compatible external root — hidden until the user presses `c`.
     write_skill(
         ws.workspace().join(".agents").join("skills"),
         "workspace-beta",
@@ -1578,16 +1583,46 @@ fn skills_menu_shows_local_and_global_skills() -> anyhow::Result<()> {
     h.wait_for_text("/skills", KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(2))?;
     h.send(keys::key::enter())?;
-    h.wait_for_text("Available skills", KEY_TIMEOUT)?;
+    h.wait_for_text("Skills Manager", KEY_TIMEOUT)?;
     h.wait_for_text("global-alpha", KEY_TIMEOUT)?;
-    h.wait_for_text("workspace-beta", KEY_TIMEOUT)?;
 
-    let f = h.frame();
-    let dump = f.debug_dump();
-    assert!(f.contains("global-alpha"), "global skill missing:\n{dump}");
+    let owned = h.frame();
+    let owned_dump = owned.debug_dump();
     assert!(
-        f.contains("workspace-beta"),
-        "workspace skill missing:\n{dump}"
+        owned.contains("global-alpha"),
+        "owned global skill missing:\n{owned_dump}"
+    );
+    assert!(
+        !owned.contains("workspace-beta"),
+        "compatible skill must stay hidden in owned-only scan:\n{owned_dump}"
+    );
+    assert!(
+        !owned.contains("Available skills"),
+        "bare /skills must open manager, not the legacy text list:\n{owned_dump}"
+    );
+    assert!(
+        !owned.contains("Fetching registry") && !owned.contains("registry.json"),
+        "default manager must stay zero-network:\n{owned_dump}"
+    );
+
+    // Toggle to compatible scan so external roots appear.
+    h.send(keys::key::ch('c'))?;
+    h.wait_for_text("workspace-beta", KEY_TIMEOUT)?;
+    let compat = h.frame();
+    let compat_dump = compat.debug_dump();
+    assert!(
+        compat.contains("workspace-beta"),
+        "compatible skill missing after toggle:\n{compat_dump}"
+    );
+
+    h.send(keys::key::esc())?;
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(2))?;
+    h.wait_for_text(COMPOSER_READY_TEXT, KEY_TIMEOUT)?;
+    let after = h.frame();
+    assert!(
+        !after.contains("Skills Manager"),
+        "Esc should close the skills manager:\n{}",
+        after.debug_dump()
     );
 
     let _ = h.shutdown();

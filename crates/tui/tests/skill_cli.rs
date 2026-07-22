@@ -20,10 +20,14 @@ use tiny_http::{Method, Response, Server};
 // Pull the production source files into this test binary so the test can
 // reach `install`'s public surface without a dedicated library crate.
 //
-// `install.rs` only references `crate::network_policy` so we just need that
-// one helper module alongside `install` itself.
+// `install.rs` references `crate::network_policy` and `super::package_digest`
+// (sibling under `skills::`), so both are pulled in alongside `install`.
 #[path = "../src/network_policy.rs"]
 mod network_policy;
+
+#[path = "../src/skills/package_digest.rs"]
+#[allow(dead_code)]
+mod package_digest;
 
 #[path = "../src/skills/install.rs"]
 #[allow(dead_code)]
@@ -175,6 +179,16 @@ async fn install_happy_path_writes_skill_and_marker() {
     assert!(
         installed_dir.join(install::INSTALLED_FROM_MARKER).is_file(),
         ".installed-from marker present"
+    );
+    let marker = std::fs::read_to_string(installed_dir.join(install::INSTALLED_FROM_MARKER))
+        .expect("read marker");
+    assert!(
+        marker.contains("\"schema_version\": 2") || marker.contains("\"schema_version\":2"),
+        "install must write metadata v2: {marker}"
+    );
+    assert!(
+        marker.contains("content_digest"),
+        "install must bind content_digest: {marker}"
     );
 
     shutdown(tx, handle);

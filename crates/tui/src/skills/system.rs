@@ -92,9 +92,40 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
 /// Used by `/skills` to distinguish user-created skills (which should be
 /// surfaced prominently) from the always-installed bundle (which can be
 /// rendered compactly when many skills are present).
+///
+/// Prefer [`is_exact_bundled_skill`] when classifying audit rows — name-only
+/// matches can collide with user overrides of the same command name.
 #[must_use]
 pub fn is_bundled_skill_name(name: &str) -> bool {
     BUNDLED_SKILLS.iter().any(|s| s.name == name)
+}
+
+/// True when `name` is a bundled skill **and** `skill_md_content` exactly
+/// matches the shipped asset body (byte-for-byte).
+///
+/// Used by the skill audit inventory so a user-edited copy of a bundled name
+/// is not misclassified as built-in.
+#[must_use]
+pub fn is_exact_bundled_skill(name: &str, skill_md_content: &str) -> bool {
+    BUNDLED_SKILLS
+        .iter()
+        .any(|s| s.name == name && s.body == skill_md_content)
+}
+
+/// SHA-256 (hex) of the shipped `SKILL.md` body for a bundled skill, if any.
+#[must_use]
+#[allow(dead_code)] // available for managers / docs that prefer digest over body compare
+pub fn bundled_skill_body_sha256(name: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    BUNDLED_SKILLS.iter().find(|s| s.name == name).map(|s| {
+        let digest = Sha256::digest(s.body.as_bytes());
+        let mut out = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "{byte:02x}");
+        }
+        out
+    })
 }
 
 /// Attempt to install a single bundled skill into `skills_dir`.

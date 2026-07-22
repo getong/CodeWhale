@@ -435,8 +435,10 @@ Use skills when a task has a repeatable process:
 - Following a team release checklist.
 - Using a project-specific memory or wiki workflow.
 
-Inside the TUI, `/skill` activates a skill when one is available, and `/skills`
-lists installed skills. The command palette can also surface skill entries
+Inside the TUI, `/skill <name>` activates a skill when one is available, and
+bare `/skills` opens the Skills Manager (owned-only inventory, no network). Use
+`/skills <prefix>`, `/skills inspect`, `/skills --remote`, or `/skills sync`
+for the text/registry paths. The command palette can also surface skill entries
 alongside normal slash commands.
 
 Good skills are narrow. They should tell the model what workflow to follow,
@@ -447,9 +449,10 @@ If a repository has its own instructions, treat them as part of the active
 work. Read the local guidance before editing, and keep any contribution within
 the repository's conventions.
 
-Next: see [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md) for
-Claude Code skill/plugin compatibility, and [CONFIGURATION.md](CONFIGURATION.md)
-for config paths and project authority.
+Next: see [SKILLS.md](SKILLS.md) for the manager, ownership, and provenance
+rules; [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md) for Claude Code
+skill/plugin compatibility; and [CONFIGURATION.md](CONFIGURATION.md) for config
+paths and project authority.
 
 ## 10. Getting Help
 

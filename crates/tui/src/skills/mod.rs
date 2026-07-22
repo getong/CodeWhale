@@ -1,6 +1,10 @@
 //! Skill discovery and registry for local SKILL.md files.
 
+pub mod audit;
 pub mod install;
+pub mod mutation;
+mod package_digest;
+pub mod roots;
 mod system;
 // Re-exports kept for documentation parity and downstream consumers; the
 // binary itself imports directly from `skills::install`. `#[allow(...)]`
@@ -12,6 +16,13 @@ pub use install::{
     InstallSource, InstalledSkill, RegistryDocument, RegistryEntry, RegistryFetchResult,
     SkillSyncOutcome, SyncResult, UpdateResult, default_cache_skills_dir,
 };
+#[allow(unused_imports)]
+pub use roots::{
+    CompatibleHarness, SkillRootAccess, SkillRootCatalog, SkillRootDescriptor, SkillRootId,
+    SkillRootKind, SkillScope, classify_configured_skills_dir, safe_display_path,
+};
+#[allow(unused_imports)]
+pub use system::{bundled_skill_body_sha256, is_exact_bundled_skill};
 pub use system::{install_system_skills, is_bundled_skill_name};
 
 use std::fs;
@@ -619,7 +630,7 @@ fn is_valid_skill_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
-fn normalize_skill_name_for_lookup(name: &str) -> String {
+pub(crate) fn normalize_skill_name_for_lookup(name: &str) -> String {
     if let Some((plugin, skill)) = name.trim().split_once(':')
         && !plugin.is_empty()
         && !skill.is_empty()
@@ -673,7 +684,8 @@ fn normalize_skill_name_segment(name: &str) -> String {
 /// other AI-tool conventions installed in the same workspace
 /// (#432).
 ///
-/// Precedence (first match wins on name conflicts):
+/// Precedence is defined once in [`roots::SkillRootCatalog`] (first
+/// match wins on name conflicts):
 ///
 /// 1. `<workspace>/.agents/skills` — deepseek-native convention.
 /// 2. `<workspace>/skills` — flat, project-local.
@@ -685,6 +697,9 @@ fn normalize_skill_name_segment(name: &str) -> String {
 /// 8. `~/.claude/skills` — Claude-ecosystem global (#902).
 /// 9. `~/.codewhale/skills` — CodeWhale global, primary install target.
 /// 10. `~/.deepseek/skills` — legacy DeepSeek global fallback.
+///
+/// Compatible audit may also observe `.codex/skills`, but that root is
+/// never activated for runtime discovery in this catalog.
 ///
 /// Only directories that exist on disk are returned — callers don't
 /// need to filter further. Returns an empty vec when nothing is
@@ -706,58 +721,12 @@ fn skills_directories_with_home_and_mode(
     home_dir: Option<&Path>,
     mode: SkillDiscoveryMode,
 ) -> Vec<PathBuf> {
-    let mut candidates = match mode {
-        SkillDiscoveryMode::Compatible => vec![
-            workspace.join(".agents").join("skills"),
-            workspace.join("skills"),
-            workspace.join(".opencode").join("skills"),
-            workspace.join(".claude").join("skills"),
-            workspace.join(".cursor").join("skills"),
-            workspace.join(".codewhale").join("skills"),
-        ],
-        SkillDiscoveryMode::CodeWhaleOnly => codewhale_workspace_skills_dir(workspace)
-            .into_iter()
-            .collect(),
-    };
-    if let Some(home) = home_dir {
-        match mode {
-            SkillDiscoveryMode::Compatible => {
-                candidates.push(home.join(".agents").join("skills"));
-                candidates.push(home.join(".claude").join("skills"));
-                candidates.push(home.join(".codewhale").join("skills"));
-                candidates.push(home.join(".deepseek").join("skills"));
-            }
-            SkillDiscoveryMode::CodeWhaleOnly => {
-                candidates.push(home.join(".codewhale").join("skills"));
-            }
-        }
-    } else {
-        candidates.push(PathBuf::from("/tmp/codewhale/skills"));
-    }
-    existing_skill_dirs(candidates)
+    roots::skills_directories_with_home_and_mode(workspace, home_dir, mode)
 }
 
-pub(crate) fn codewhale_workspace_skills_dir(workspace: &Path) -> Option<PathBuf> {
-    let skills_dir = workspace.join(".codewhale").join("skills");
-    let canonical_workspace = fs::canonicalize(workspace).ok()?;
-    let canonical_skills = fs::canonicalize(&skills_dir).ok()?;
-    (canonical_skills.is_dir() && canonical_skills.starts_with(canonical_workspace))
-        .then_some(skills_dir)
-}
-
-fn existing_skill_dirs(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for path in candidates {
-        let Ok(canonical_path) = fs::canonicalize(&path) else {
-            continue;
-        };
-        if canonical_path.is_dir() && seen.insert(canonical_path) {
-            out.push(path);
-        }
-    }
-    out
-}
+pub(crate) use roots::codewhale_workspace_skills_dir;
+#[cfg(test)]
+pub(crate) use roots::existing_skill_dirs;
 
 /// Walk every candidate skills directory for a workspace and merge
 /// the discovered skills into a single registry. Name conflicts are
@@ -832,7 +801,11 @@ pub fn skill_directories_for_workspace_and_dir(
 }
 
 fn insert_configured_skills_dir(dirs: &mut Vec<PathBuf>, workspace: &Path, skills_dir: &Path) {
-    if !skills_dir.is_dir() || dirs.iter().any(|p| paths_refer_to_same_dir(p, skills_dir)) {
+    if !skills_dir.is_dir()
+        || dirs
+            .iter()
+            .any(|p| roots::paths_refer_to_same_dir(p, skills_dir))
+    {
         return;
     }
 
@@ -845,16 +818,6 @@ fn insert_configured_skills_dir(dirs: &mut Vec<PathBuf>, workspace: &Path, skill
         })
         .unwrap_or(dirs.len());
     dirs.insert(insert_at, skills_dir.to_path_buf());
-}
-
-fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
 }
 
 #[allow(dead_code)]
