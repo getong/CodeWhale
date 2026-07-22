@@ -59,7 +59,8 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
 
     // Show help overlay
     if app.view_stack.top_kind() != Some(ModalKind::Help) {
-        app.view_stack.push(HelpView::new_for_locale(app.ui_locale));
+        let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace);
+        app.view_stack.push(help);
     }
     CommandResult::ok()
 }
