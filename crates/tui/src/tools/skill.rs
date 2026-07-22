@@ -555,9 +555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn execute_loads_global_codewhale_skill_without_workspace_trust() {
-        let _env_lock = crate::test_support::lock_test_env();
+    async fn execute_loads_configured_external_skill_without_workspace_trust() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         let home = tmp.path().join("home");
@@ -569,10 +567,12 @@ mod tests {
             "Global helper",
             "Global body marker.",
         );
-        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
-        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
 
-        let context = ToolContext::new(&workspace);
+        // Keep this test independent of the process-native home directory:
+        // `dirs::home_dir()` cannot be redirected reliably after process start
+        // on Windows. The injected-home discovery test in `skills::tests`
+        // separately proves that ~/.codewhale/skills enters the default catalog.
+        let context = ToolContext::new(&workspace).with_skills_config(global_skills.clone(), false);
         assert!(!context.trust_mode);
         assert!(
             context
@@ -589,7 +589,7 @@ mod tests {
         let result = LoadSkillTool
             .execute(json!({"name": "global-helper"}), &context)
             .await
-            .expect("load_skill host lookup should open ~/.codewhale/skills");
+            .expect("load_skill host lookup should open a configured external skill root");
         assert!(result.success);
         assert!(result.content.contains("Global body marker."));
     }

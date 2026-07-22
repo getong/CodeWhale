@@ -2208,7 +2208,7 @@ body";
             "body",
         );
         write_skill(
-            &home.join(".deepseek").join("skills"),
+            &home.join(".codewhale").join("skills"),
             "global-alpha",
             "Global alpha skill",
             "body",
@@ -2225,7 +2225,7 @@ body";
         );
         assert!(
             names.contains(&"global-alpha"),
-            "global-alpha from ~/.deepseek/skills must be discovered: {names:?}",
+            "global-alpha from ~/.codewhale/skills must be discovered: {names:?}",
         );
     }
 
