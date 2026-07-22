@@ -7,7 +7,7 @@ runtime without claiming that the candidate has been published or deployed.
 
 - Protected base at source freeze: `a7c00a1a8e48021daf2a9c78cfc1dbda8269e074`
   (`origin/main`, refreshed 2026-07-22)
-- Runtime source: `fa46105a7183ce961f503996a7e746f763ffb29c`
+- Runtime source: `4d197626d72b4bd27e1abf4eed92e86e914414a8`
 - Product truth: `508726960`
 - Product-first homepage: `e37df06ca`
 - Credential-free deploy preflight: `74862148a`
@@ -22,9 +22,10 @@ frozen source, alongside merged PRs #4673 and #4678. No contributor history
 was flattened or rewritten. Draft #4508 supplied recovered screenshot intent;
 it was not merged wholesale.
 
-The credited fixes for #4681, #4682, and the verified strict-DeepSeek boundary
-in #4683 are also ancestors of the frozen source. The broader intermittent
-network symptom reported in #4683 was not reproduced and is not claimed fixed.
+The credited fixes for #4681, #4682, the verified strict-DeepSeek boundary in
+#4683, and Wenhao Hu's Full Access/global-skill boundary report in #4684 are
+also ancestors of the frozen source. The broader intermittent network symptom
+reported in #4683 was not reproduced and is not claimed fixed.
 
 ## Scope decisions
 
@@ -34,9 +35,9 @@ network symptom reported in #4683 was not reproduced and is not claimed fixed.
 - Use the existing whale component with a small CSS sun in the community
   section; no generated illustration is shipped.
 - Use the real TUI PTY capture from commit
-  `fa46105a7183ce961f503996a7e746f763ffb29c` as the homepage and README image.
+  `4d197626d72b4bd27e1abf4eed92e86e914414a8` as the homepage and README image.
   The two public copies share SHA-256
-  `b6d869b74985e8c1c89288076185ce8de5f951e190f0a745e5949c5b60cc666f`.
+  `8ffd0c36699930a9af7bcca3e93d3f9bc8a11df5a691e88335fc8b1f0442a754`.
 
 ## Visual QA
 
@@ -68,10 +69,10 @@ Artifacts:
 - `docs/evidence/v091-home-zh-mobile.png`
 
 The four accepted captures have SHA-256 values, in the order above,
-`38d31e8499c325158243d0ca611c49354dbf8ba17cb03a3d1a51131047e0445e`,
-`13e9df4cec42f09bd0282287b7d6c3ec03842a5853261d533eec724eccdce61d`,
-`faa0b2bdf06205d352bb9594bb29bc11ca2645eb8bdd8a94832d56aedf5baf4c`,
-and `4a10d1cad6ac71e68bf60c5e2321b5a91fa427cdf91b62c7ece471385886c21f`.
+`1e6ca263dcae66be0851760ee06675ac825c013c7e93a57f90a7f67abcb63122`,
+`af46a2274810d6a6a0bd6c1e2ed74e335678313f1119f513873680764de4cc26`,
+`4ae745fa9b93195e7d43a9be36300cb9ec22f5ff6194e05a383732ffce7c8a20`,
+and `a00d0e350cf2e2ba7f1eb34f3ba5b94eead20ad09b83b8afddce9e4d8cff5dc5`.
 
 ## Verification
 
@@ -82,12 +83,12 @@ npm test -- --run
 npm run check:facts
 npm run check:docs
 npm run check:deploy-env -- --preflight
-CODEWHALE_SOURCE_REVISION=fa46105a7183ce961f503996a7e746f763ffb29c \
+CODEWHALE_SOURCE_REVISION=4d197626d72b4bd27e1abf4eed92e86e914414a8 \
   npm run compare:deployed-facts
 npx tsc --noEmit
-CODEWHALE_SOURCE_REVISION=fa46105a7183ce961f503996a7e746f763ffb29c \
+CODEWHALE_SOURCE_REVISION=4d197626d72b4bd27e1abf4eed92e86e914414a8 \
   npm run build
-CODEWHALE_SOURCE_REVISION=fa46105a7183ce961f503996a7e746f763ffb29c \
+CODEWHALE_SOURCE_REVISION=4d197626d72b4bd27e1abf4eed92e86e914414a8 \
   npx opennextjs-cloudflare build
 bash scripts/release/check-versions.sh
 git diff --check

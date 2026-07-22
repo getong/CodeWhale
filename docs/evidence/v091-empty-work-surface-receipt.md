@@ -5,9 +5,9 @@ is not based on a product mockup.
 
 ## Source
 
-- Version: `codewhale-tui 0.9.1 (fa46105a7183)`
-- Commit: `fa46105a7183ce961f503996a7e746f763ffb29c`
-- Checkout at capture: clean detached exact-source worktree for
+- Version: `codewhale-tui 0.9.1 (4d197626d72b)`
+- Commit: `4d197626d72b4bd27e1abf4eed92e86e914414a8`
+- Checkout at capture: clean exact-source worktree for
   `codex/v091-final-integration-20260721`
 - Terminal: `120x32`
 - Route: isolated local Ollama configuration using `qwen3-coder`; no API key
@@ -40,12 +40,12 @@ target/release/codewhale-tui \
 ```
 
 The resulting 1280x720 capture has SHA-256
-`b6d869b74985e8c1c89288076185ce8de5f951e190f0a745e5949c5b60cc666f`.
+`8ffd0c36699930a9af7bcca3e93d3f9bc8a11df5a691e88335fc8b1f0442a754`.
 It contains no username, credential, account identifier, private repository
 path, error state, or unsupported product claim. The idle capture process had
 no open TCP or UDP socket. `NO_ANIMATIONS=1` makes this one canonical still
 stable; the separate real-PTY suite proves full, reduced, and still motion.
-The captured header visibly identifies `v0.9.1 (fa46105a7183)`, and the context
+The captured header visibly identifies `v0.9.1 (4d197626d72b)`, and the context
 line is `~/codewhale-demo · main · mcp 0`.
 
 ## Acceptance
@@ -57,7 +57,7 @@ TUI unit suite.
 
 ```text
 cargo test -p codewhale-tui --bins --all-features --locked
-test result: ok. 8062 passed; 0 failed; 4 ignored
+test result: ok. 8063 passed; 0 failed; 4 ignored
 
 cargo test -p codewhale-tui --test qa_pty --locked
 test result: ok. 25 passed; 0 failed; 1 ignored
