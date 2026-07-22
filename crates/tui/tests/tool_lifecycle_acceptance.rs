@@ -20,6 +20,11 @@ const FEATURE_PATH: &str = concat!(
 const HAPPY_PATH_SCENARIO: &str = "Happy path lists the current directory through a tool";
 const UNKNOWN_TOOL_SCENARIO: &str = "Unknown tool returns an error result";
 const MALFORMED_ARGUMENTS_SCENARIO: &str = "Malformed tool arguments return an error result";
+const REAL_TOOL_ERROR_SCENARIO: &str = "A real tool error is returned to the follow-up request";
+const EMPTY_TOOL_RESULT_SCENARIO: &str =
+    "An empty tool result is returned to the follow-up request";
+const MISSING_SUMMARY_SCENARIO: &str =
+    "A follow-up answer missing the expected summary is detected";
 const TOOL_CALL_ID: &str = "call_tool";
 const TEST_MODEL: &str = "acceptance-model";
 
@@ -206,12 +211,11 @@ fn codewhale_should_send_tool_result_back_to_mocked_llm(world: &mut ToolLifecycl
         .get("content")
         .and_then(serde_json::Value::as_str)
         .expect("tool result content");
-    for entry in ["README.md", "notes.txt", "src"] {
-        assert!(
-            content.contains(entry),
-            "tool result sent to LLM should include {entry}:\n{content}"
-        );
-    }
+    assert_eq!(
+        content,
+        tool_result_output(world),
+        "follow-up request should preserve the exact public tool result"
+    );
 }
 
 #[then(regex = r#"^the public tool result should report an error for "([^"]+)"$"#)]
@@ -311,6 +315,74 @@ fn codewhale_should_send_malformed_argument_error_back_to_mocked_llm(
 }
 
 #[then(
+    regex = r#"^the public tool result should report a real error for "([^"]+)" containing "([^"]+)"$"#
+)]
+fn public_tool_result_should_report_real_error(
+    world: &mut ToolLifecycleWorld,
+    tool_name: String,
+    expected: String,
+) {
+    let _ = tool_use_event(world, &tool_name);
+    let event = tool_result_event(world);
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
+
+    let output = event
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("real tool error output");
+    assert!(
+        output.contains(&expected) && output.contains("Failed to read"),
+        "real {tool_name} failure should preserve the path and execution error:\n{output}"
+    );
+}
+
+#[then("CodeWhale should send the real tool error back to the mocked LLM")]
+fn codewhale_should_send_real_tool_error_back_to_mocked_llm(world: &mut ToolLifecycleWorld) {
+    let request = world
+        .requests
+        .iter()
+        .find(|request| request_contains_tool_result(request))
+        .expect("expected a follow-up chat request containing the real tool error");
+    let content = tool_result_message(request)
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .expect("real tool error content");
+    assert!(
+        content.contains("missing.txt") && content.contains("Failed to read"),
+        "real tool error sent to the LLM should preserve the execution failure:\n{content}"
+    );
+}
+
+#[then("the public tool result should be an empty list")]
+fn public_tool_result_should_be_an_empty_list(world: &mut ToolLifecycleWorld) {
+    let output = tool_result_output(world);
+    let value: Value = serde_json::from_str(output).expect("empty list_dir result should be JSON");
+    assert_eq!(value, json!([]), "empty workspace should return []");
+    assert_eq!(
+        tool_result_event(world)
+            .get("status")
+            .and_then(Value::as_str),
+        Some("success")
+    );
+}
+
+#[then("CodeWhale should send the empty tool result back to the mocked LLM")]
+fn codewhale_should_send_empty_tool_result_back_to_mocked_llm(world: &mut ToolLifecycleWorld) {
+    let request = world
+        .requests
+        .iter()
+        .find(|request| request_contains_tool_result(request))
+        .expect("expected a follow-up chat request containing the empty tool result");
+    let content = tool_result_message(request)
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .expect("empty tool result content");
+    let value: Value =
+        serde_json::from_str(content).expect("forwarded empty result should be JSON");
+    assert_eq!(value, json!([]), "follow-up request should preserve []");
+}
+
+#[then(
     regex = r#"^the public tool lifecycle should show a failed tool with raw input for "([^"]+)"$"#
 )]
 fn public_tool_lifecycle_should_show_failed_tool_with_raw_input(
@@ -361,17 +433,25 @@ fn public_tool_lifecycle_should_show_failed_tool(world: &mut ToolLifecycleWorld,
 
 #[then(regex = r#"^the public output should include "([^"]+)"$"#)]
 fn public_output_should_include(world: &mut ToolLifecycleWorld, expected: String) {
-    let content = world
-        .events
-        .iter()
-        .filter(|event| event.get("type").and_then(Value::as_str) == Some("content"))
-        .filter_map(|event| event.get("content").and_then(Value::as_str))
-        .collect::<String>();
+    let content = public_content_output(world);
     assert!(
         content.contains(&expected),
         "public content output should include {expected:?}:\nstdout:\n{}\nstderr:\n{}",
         world.stdout,
         world.stderr
+    );
+}
+
+#[then(regex = r#"^acceptance should report the missing expected summary "([^"]+)"$"#)]
+fn acceptance_should_report_missing_expected_summary(
+    world: &mut ToolLifecycleWorld,
+    expected: String,
+) {
+    let report = require_follow_up_summary(world, &expected)
+        .expect_err("fixture answer intentionally omits the expected summary");
+    assert!(
+        report.contains(&expected) && report.contains("missing expected summary"),
+        "missing-summary oracle should name the absent contract:\n{report}"
     );
 }
 
@@ -388,6 +468,21 @@ async fn unknown_tool_returns_error_result() {
 #[tokio::test(flavor = "current_thread")]
 async fn malformed_tool_arguments_return_error_result() {
     run_scenario(MALFORMED_ARGUMENTS_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_tool_error_is_returned_to_follow_up_request() {
+    run_scenario(REAL_TOOL_ERROR_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_tool_result_is_returned_to_follow_up_request() {
+    run_scenario(EMPTY_TOOL_RESULT_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_follow_up_summary_is_detected() {
+    run_scenario(MISSING_SUMMARY_SCENARIO, 11).await;
 }
 
 async fn run_scenario(name: &'static str, expected_steps: usize) {
@@ -720,6 +815,26 @@ fn value_contains_text(value: &Value, expected: &str) -> bool {
             .values()
             .any(|value| value_contains_text(value, expected)),
         _ => false,
+    }
+}
+
+fn public_content_output(world: &ToolLifecycleWorld) -> String {
+    world
+        .events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("content"))
+        .filter_map(|event| event.get("content").and_then(Value::as_str))
+        .collect()
+}
+
+fn require_follow_up_summary(world: &ToolLifecycleWorld, expected: &str) -> Result<(), String> {
+    let content = public_content_output(world);
+    if content.contains(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "missing expected summary {expected:?} in follow-up answer {content:?}"
+        ))
     }
 }
 
