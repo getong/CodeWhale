@@ -4931,6 +4931,25 @@ mod tests {
     }
 
     #[test]
+    fn slash_completion_hints_discover_debt_from_compat_aliases() {
+        for alias in ["slop", "canzha"] {
+            let hints = slash_completion_hints(
+                &format!("/{alias}"),
+                128,
+                &[],
+                Locale::En,
+                None,
+                ApiProvider::Deepseek,
+            );
+            let debt = hints
+                .iter()
+                .find(|hint| hint.name == "/debt")
+                .unwrap_or_else(|| panic!("/debt should appear for /{alias}"));
+            assert_eq!(debt.alias_hint.as_deref(), Some(alias));
+        }
+    }
+
+    #[test]
     fn slash_completion_hints_rank_exact_alias_above_prefix_alias() {
         // `/q` should rank `/exit` (exact alias `q`) above `/clear` (alias
         // `qingping` only matches by prefix). Before #1811 the entries were

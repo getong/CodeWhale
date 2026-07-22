@@ -149,8 +149,10 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         return result;
     }
 
-    // Permanent backward-compatible aliases. They predate the group-owned
-    // registry and remain documented in docs/architecture/command-dispatch.md.
+    // Permanent backward-compatible mode aliases. They select a fixed mode
+    // rather than the canonical `/mode` behavior, so they still dispatch
+    // before registry lookup. Ordinary compatibility aliases belong in their
+    // command's `CommandInfo` metadata.
     match command.as_str() {
         "jihua" => {
             return groups::config::dispatch(app, "jihua", arg).unwrap_or_else(|| {
@@ -160,11 +162,6 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         "zidong" => {
             return groups::config::dispatch(app, "zidong", arg).unwrap_or_else(|| {
                 CommandResult::error("The /zidong alias could not be dispatched.")
-            });
-        }
-        "slop" | "canzha" => {
-            return groups::config::dispatch(app, "debt", arg).unwrap_or_else(|| {
-                CommandResult::error("The /debt command could not be dispatched.")
             });
         }
         _ => {}
@@ -431,6 +428,41 @@ mod tests {
             .find(|cmd| cmd.name == "links")
             .expect("links command should exist");
         assert_eq!(links.aliases, &["dashboard", "api", "lianjie"]);
+    }
+
+    #[test]
+    fn debt_compat_aliases_use_registry_discovery_and_help() {
+        let debt = get_command_info("debt").expect("debt command should be registered");
+        assert_eq!(debt.aliases, &["cleanup", "slop", "canzha"]);
+        assert_eq!(debt.description_id, MessageId::CmdDebtDescription);
+
+        for alias in ["slop", "canzha"] {
+            let resolved = get_command_info(alias)
+                .unwrap_or_else(|| panic!("/{alias} should resolve through the registry"));
+            assert_eq!(resolved.name, "debt");
+
+            let mut app = create_test_app();
+            let result = execute(&format!("/help {alias}"), &mut app);
+            assert!(!result.is_error, "/help {alias} returned {result:?}");
+            let message = result
+                .message
+                .unwrap_or_else(|| panic!("/help {alias} should return text"));
+            assert!(
+                message.starts_with("debt\n"),
+                "unexpected help: {message:?}"
+            );
+            assert!(
+                message.contains("cleanup, slop, canzha"),
+                "help should list every debt alias: {message:?}"
+            );
+        }
+
+        assert!(
+            suggest_command_names("slpo", 3)
+                .iter()
+                .any(|name| name == "debt"),
+            "typo suggestions should consider the /slop alias"
+        );
     }
 
     #[test]
