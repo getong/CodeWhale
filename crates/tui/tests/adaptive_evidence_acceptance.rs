@@ -233,19 +233,12 @@ fn tool_result_content_for<'a>(body: &'a Value, call_id: &str) -> Option<&'a str
 }
 
 fn bash_tool_sse(call_id: &str, success: bool) -> String {
-    let (sentinel, prefix, trailer) = if success {
-        (SUCCESS_SENTINEL, "BASH-SUCCESS", "")
+    let (sentinel, prefix) = if success {
+        (SUCCESS_SENTINEL, "BASH-SUCCESS")
     } else {
-        (FAILURE_SENTINEL, "BASH-FAILURE", "; exit 7")
+        (FAILURE_SENTINEL, "BASH-FAILURE")
     };
-    let body = format!(
-        "i=0; while [ \"$i\" -lt 2800 ]; do if [ \"$i\" -eq 120 ]; then printf '%s\\n' '{sentinel}'; fi; printf '{prefix}-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done{trailer}"
-    );
-    let command = if success {
-        body
-    } else {
-        format!("{{ {body}; }} >&2")
-    };
+    let command = probe_command(sentinel, prefix, success);
     let arguments = serde_json::to_string(&json!({
         "action": "run",
         "command": command,
@@ -257,6 +250,55 @@ fn bash_tool_sse(call_id: &str, success: bool) -> String {
         chunk(json!({"id":"tool","object":"chat.completion.chunk","model":MODEL,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}})),
         "data: [DONE]\n\n".to_string(),
     ].join("")
+}
+
+/// Shell fixture that emits enough bytes to force exact-evidence routing: one
+/// sentinel line buried at iteration 120 of ~2,800 filler lines. The probe
+/// executes through the platform shell — bash on Unix, `cmd /C` on Windows
+/// (#1691) — so each platform needs native syntax to exercise the same
+/// routing path.
+#[cfg(not(windows))]
+fn probe_command(sentinel: &str, prefix: &str, success: bool) -> String {
+    let trailer = if success { "" } else { "; exit 7" };
+    let body = format!(
+        "i=0; while [ \"$i\" -lt 2800 ]; do if [ \"$i\" -eq 120 ]; then printf '%s\\n' '{sentinel}'; fi; printf '{prefix}-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done{trailer}"
+    );
+    if success {
+        body
+    } else {
+        format!("{{ {body}; }} >&2")
+    }
+}
+
+/// PowerShell syntax: on Windows the shell dispatcher prefers `pwsh.exe`,
+/// then in-box `powershell.exe`, only falling back to `cmd.exe` when no
+/// PowerShell exists at all. Single quotes only — the payload is passed to
+/// `-Command` as one argv string, and four or more double quotes would push
+/// it onto the temp-`-File` path for no benefit. The failure variant mirrors
+/// the Unix `{ ...; } >&2; exit 7` shape by writing every line to the OS
+/// stderr handle and exiting 7 after the loop.
+#[cfg(windows)]
+fn probe_command(sentinel: &str, prefix: &str, success: bool) -> String {
+    let emit = |text: &str| {
+        if success {
+            format!("Write-Output {text}")
+        } else {
+            format!("[Console]::Error.WriteLine({text})")
+        }
+    };
+    let line = format!(
+        "'{prefix}-{{0}}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+    );
+    let body = format!(
+        "0..2799 | ForEach-Object {{ if ($_ -eq 120) {{ {} }} else {{ {} }} }}",
+        emit(&format!("'{sentinel}'")),
+        emit(&format!("({line} -f $_)"))
+    );
+    if success {
+        body
+    } else {
+        format!("{body}; exit 7")
+    }
 }
 
 fn final_sse() -> String {
